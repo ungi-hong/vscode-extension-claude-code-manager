@@ -1,0 +1,190 @@
+{
+  "name": "claude-code-manager",
+  "displayName": "Claude Code Manager",
+  "description": "VSCode/Cursor 拡張内で Claude Code セッションを起動・対話できるダッシュボード。フォルダ単位でセッションを管理し、Webview チャットで完結",
+  "version": "0.1.0",
+  "publisher": "hong-woongi-ab",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ccmgr",
+          "title": "Claude Code Manager",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ccmgr": [
+        {
+          "id": "ccmgr.sessions",
+          "name": "Sessions",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Claude Code Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeCodeManager.openSession",
+        "title": "Open Session Detail",
+        "category": "Claude Code Manager",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "claudeCodeManager.refresh",
+        "title": "Refresh Sessions",
+        "category": "Claude Code Manager",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeCodeManager.copySessionId",
+        "title": "Copy Session ID",
+        "category": "Claude Code Manager"
+      },
+      {
+        "command": "claudeCodeManager.hideSession",
+        "title": "Hide from Sidebar",
+        "category": "Claude Code Manager",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "claudeCodeManager.showHiddenSessions",
+        "title": "Show Hidden Sessions...",
+        "category": "Claude Code Manager",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "claudeCodeManager.focusSidebar",
+        "title": "Focus Claude Code Manager Sidebar",
+        "category": "Claude Code Manager"
+      },
+      {
+        "command": "claudeCodeManager.addFolder",
+        "title": "Add Folder...",
+        "category": "Claude Code Manager",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "claudeCodeManager.removeFolder",
+        "title": "Remove Folder",
+        "category": "Claude Code Manager",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeCodeManager.newSession",
+        "title": "New Session",
+        "category": "Claude Code Manager",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "claudeCodeManager.forgetSession",
+        "title": "Forget Managed Session",
+        "category": "Claude Code Manager",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeCodeManager.addFolder",
+          "when": "view == ccmgr.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeCodeManager.refresh",
+          "when": "view == ccmgr.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeCodeManager.showHiddenSessions",
+          "when": "view == ccmgr.sessions",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeCodeManager.newSession",
+          "when": "view == ccmgr.sessions && viewItem =~ /^folder\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeCodeManager.removeFolder",
+          "when": "view == ccmgr.sessions && viewItem == folder.user",
+          "group": "9_remove"
+        },
+        {
+          "command": "claudeCodeManager.openSession",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeCodeManager.hideSession",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "8_archive"
+        },
+        {
+          "command": "claudeCodeManager.copySessionId",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "9_copy"
+        },
+        {
+          "command": "claudeCodeManager.forgetSession",
+          "when": "view == ccmgr.sessions && viewItem == session.managed",
+          "group": "9_forget"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Code Manager",
+      "properties": {
+        "claudeCodeManager.staleAfterMinutes": {
+          "type": "number",
+          "default": 30,
+          "description": "セッションが何分間更新されないと stale として薄表示にするか"
+        },
+        "claudeCodeManager.hideSessionsOlderThanHours": {
+          "type": "number",
+          "default": 24,
+          "description": "起動時に何時間以上前のセッションを初期ロード対象から除外するか"
+        },
+        "claudeCodeManager.maxEventsPerSession": {
+          "type": "number",
+          "default": 200,
+          "description": "registry が保持する 1 セッションあたりの直近イベント数 (Webview で全件必要なら都度 jsonl から再ロード)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.config.js",
+    "watch": "node esbuild.config.js --watch",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package",
+    "compile-tests": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.132",
+    "chokidar": "^3.6.0",
+    "marked": "^12.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.27.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
