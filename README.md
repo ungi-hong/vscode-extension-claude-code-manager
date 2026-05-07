@@ -1,0 +1,1 @@
+# vscode-extension-claude-code-manager
