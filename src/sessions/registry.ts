@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { projectBaseName } from "../utils/projectsPath";
+import { truncate } from "../utils/text";
 import {
   extractAssistantText,
   extractStopReason,
@@ -224,6 +225,3 @@ export class SessionRegistry extends EventEmitter {
     if (changed) this.emit("snapshot");
   }
 }
-
-const truncate = (text: string, max: number): string =>
-  text.length > max ? text.slice(0, max - 1).trimEnd() + "…" : text;

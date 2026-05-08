@@ -1,4 +1,7 @@
 import { marked } from "marked";
+import DOMPurify from "dompurify";
+
+marked.setOptions({ breaks: true, gfm: true });
 
 interface VsCodeApi {
   postMessage(msg: unknown): void;
@@ -71,7 +74,11 @@ function submitInput() {
 
 let pendingAssistantBlock: HTMLElement | null = null;
 let pendingAssistantBody: HTMLElement | null = null;
-let pendingAssistantText = "";
+// SDK の stream_event は複数の content_block (text / tool_use / ...) を index 付きで
+// 順次送ってくる。delta が text 以外の block (tool_use の input_json_delta 等) に
+// 紛れ込んで assistant 表示領域に流れないよう、block index → 状態で管理する。
+const activeBlockTypes = new Map<number, string>();
+const activeBlockTexts = new Map<number, string>();
 
 function showThinking() {
   if (pendingAssistantBlock) return;
@@ -85,19 +92,26 @@ function showThinking() {
   log.appendChild(block);
   pendingAssistantBlock = block;
   pendingAssistantBody = body;
-  pendingAssistantText = "";
+  activeBlockTypes.clear();
+  activeBlockTexts.clear();
 }
 
-function appendPartialText(text: string) {
+function appendTextDelta(index: number, text: string) {
   if (!pendingAssistantBlock) showThinking();
   if (!pendingAssistantBody) return;
   if (pendingAssistantBody.classList.contains("thinking")) {
     pendingAssistantBody.classList.remove("thinking");
     pendingAssistantBody.innerHTML = "";
   }
-  pendingAssistantText += text;
+  const prev = activeBlockTexts.get(index) ?? "";
+  activeBlockTexts.set(index, prev + text);
   // 進行中は素のテキストで表示。最終 assistant 受信時に Markdown 化。
-  pendingAssistantBody.textContent = pendingAssistantText;
+  // 複数 text block があれば index 順に結合。
+  const ordered = Array.from(activeBlockTexts.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => v)
+    .join("");
+  pendingAssistantBody.textContent = ordered;
   scrollToBottomIfNeeded();
 }
 
@@ -106,7 +120,8 @@ function hideThinking() {
   pendingAssistantBlock.remove();
   pendingAssistantBlock = null;
   pendingAssistantBody = null;
-  pendingAssistantText = "";
+  activeBlockTypes.clear();
+  activeBlockTexts.clear();
 }
 
 function showStatusLine(text: string, kind: "info" | "error" = "info") {
@@ -177,12 +192,32 @@ function applySdkMessage(msg: any) {
 
   if (msg.type === "stream_event") {
     const ev = msg.event;
-    if (
-      ev?.type === "content_block_delta" &&
-      ev?.delta?.type === "text_delta" &&
-      typeof ev.delta.text === "string"
-    ) {
-      appendPartialText(ev.delta.text);
+    if (ev?.type === "content_block_start" && typeof ev.index === "number") {
+      const blockType =
+        typeof ev.content_block?.type === "string"
+          ? (ev.content_block.type as string)
+          : "unknown";
+      activeBlockTypes.set(ev.index, blockType);
+      if (blockType === "text") activeBlockTexts.set(ev.index, "");
+      return;
+    }
+    if (ev?.type === "content_block_delta" && typeof ev.index === "number") {
+      // text_delta は対応する block が text の場合のみ流す。tool_use の
+      // input_json_delta 等を流すと assistant 表示が JSON 文字列で汚れる。
+      if (
+        ev.delta?.type === "text_delta" &&
+        typeof ev.delta.text === "string" &&
+        activeBlockTypes.get(ev.index) === "text"
+      ) {
+        appendTextDelta(ev.index, ev.delta.text);
+      }
+      return;
+    }
+    if (ev?.type === "content_block_stop" && typeof ev.index === "number") {
+      activeBlockTypes.delete(ev.index);
+      // 表示中の text は assistant 完全メッセージで Markdown 化されて
+      // 上書きされるので、ここでは消さない。
+      return;
     }
     return;
   }
@@ -361,9 +396,10 @@ function timestampEl(ts: number, role: string): HTMLElement {
 }
 
 function renderMarkdown(text: string): string {
-  marked.setOptions({ breaks: true, gfm: true });
   const html = marked.parse(text, { async: false }) as string;
-  return html;
+  // marked は HTML を素通しするため、DOMPurify で <script> やイベント
+  // ハンドラ (onerror 等) を除去してから innerHTML に流す。
+  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
 }
 
 function scrollToBottomIfNeeded() {

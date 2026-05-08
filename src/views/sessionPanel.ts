@@ -26,12 +26,16 @@ export class SessionPanelManager {
       if (!state) return;
       panel.pushDelta(state);
     });
-    registry.on("removed", (sessionId) => {
-      const panel = this.panels.get(sessionId);
-      if (!panel) return;
-      // pending が確定 sid に rename されたときなど。明示的に id 差し替え。
-      this.panels.delete(sessionId);
-    });
+    // NOTE: registry "removed" は処理しない。pending → confirmed の rekey 中に
+    // panel を消してしまうと孤立するため、廃棄は disposePanel 経由のみで行う。
+  }
+
+  /** forgetSession など、panel を完全に閉じたい場合に呼ぶ。 */
+  disposePanel(sessionId: string): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.dispose();
+    this.panels.delete(sessionId);
   }
 
   open(sessionId: string): void {
@@ -47,12 +51,10 @@ export class SessionPanelManager {
       );
       return;
     }
-    const panel = new SessionPanel(
-      this.context,
-      state,
-      this.actions,
-      () => this.panels.delete(this.panelKey(panel)),
-    );
+    const panel = new SessionPanel(this.context, state, this.actions, () => {
+      // panel.id は rekey で書き換わるため、dispose 時点の最新 id で削除する。
+      this.panels.delete(panel.id);
+    });
     this.panels.set(state.sessionId, panel);
     panel.bootstrap();
   }
@@ -81,19 +83,17 @@ export class SessionPanelManager {
     if (!panel) return;
     panel.pushStatus(text, kind);
   }
-
-  private panelKey(panel: SessionPanel): string {
-    for (const [id, p] of this.panels) {
-      if (p === panel) return id;
-    }
-    return "";
-  }
 }
 
 class SessionPanel {
   private readonly panel: vscode.WebviewPanel;
   private bootstrapped = false;
   private currentSessionId: string;
+
+  /** SessionPanelManager 側の Map のキーと一致する現在の id (pending/confirmed)。 */
+  get id(): string {
+    return this.currentSessionId;
+  }
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -125,6 +125,10 @@ class SessionPanel {
 
   reveal(): void {
     this.panel.reveal(undefined, false);
+  }
+
+  dispose(): void {
+    this.panel.dispose();
   }
 
   notifyIdRename(newId: string): void {
@@ -253,7 +257,7 @@ class SessionPanel {
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource}; script-src 'nonce-${nonce}';" />
   <link rel="stylesheet" href="${styleUri}" />
   <title>Claude Code Session</title>
 </head>
@@ -281,12 +285,30 @@ class SessionPanel {
   }
 }
 
-const serializeEvent = (evt: SessionEvent): any => ({
-  sessionId: evt.sessionId,
-  type: evt.type,
-  timestamp: evt.timestamp,
-  raw: evt.raw,
-});
+/**
+ * webview に必要な field だけを抽出する。jsonl raw は tool_result の長文出力で
+ * 数 MB 級になりうるため、postMessage の payload を最小化したい。
+ * NOTE: tool_result の content 自体のサイズ truncate はやっていない (UI 側で
+ *  scroll しつつ要約表示する想定)。将来必要なら別途上限を入れる。
+ */
+const serializeEvent = (evt: SessionEvent): unknown => {
+  const message = evt.raw?.message;
+  return {
+    sessionId: evt.sessionId,
+    type: evt.type,
+    timestamp: evt.timestamp,
+    raw: {
+      uuid: typeof evt.raw?.uuid === "string" ? evt.raw.uuid : undefined,
+      message: message
+        ? {
+            role: message.role,
+            content: message.content,
+            stop_reason: message.stop_reason,
+          }
+        : undefined,
+    },
+  };
+};
 
 const makeNonce = (): string => {
   const chars =

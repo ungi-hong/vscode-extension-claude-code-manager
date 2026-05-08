@@ -92,6 +92,12 @@
         "title": "Forget Managed Session",
         "category": "Claude Code Manager",
         "icon": "$(trash)"
+      },
+      {
+        "command": "claudeCodeManager.stopSession",
+        "title": "Stop Generating",
+        "category": "Claude Code Manager",
+        "icon": "$(stop-circle)"
       }
     ],
     "menus": {
@@ -127,6 +133,11 @@
           "command": "claudeCodeManager.openSession",
           "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
           "group": "inline@1"
+        },
+        {
+          "command": "claudeCodeManager.stopSession",
+          "when": "view == ccmgr.sessions && viewItem == session.managed",
+          "group": "inline@2"
         },
         {
           "command": "claudeCodeManager.hideSession",
@@ -177,6 +188,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.132",
     "chokidar": "^3.6.0",
+    "dompurify": "^3.4.2",
     "marked": "^12.0.2"
   },
   "devDependencies": {

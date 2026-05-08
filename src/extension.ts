@@ -1,8 +1,13 @@
 import * as vscode from "vscode";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { FolderStore } from "./folders/store";
 import { ManagedSessionStore } from "./runtime/persistence";
 import { ProcessManager } from "./runtime/processManager";
 import { HiddenStore } from "./sessions/hiddenStore";
+import {
+  extractAssistantSummary,
+  extractUserSummary,
+} from "./sessions/parser";
 import { SessionRegistry } from "./sessions/registry";
 import { SessionWatcher } from "./sessions/watcher";
 import { SessionsTreeProvider } from "./views/treeProvider";
@@ -55,7 +60,10 @@ export function activate(context: vscode.ExtensionContext): void {
     const state = registry.get(sessionId);
     if (!state) return false;
     if (sessionId.startsWith("pending-")) return false;
-    // external または suspended な managed → resume で managed として再起動
+    // external または suspended な managed → resume で managed として再起動。
+    // SDK の起動には数百 ms かかるため、Webview に進行状態を通知して
+    // 「送信したのに無反応」と感じさせないようにする。
+    panelManager.pushStatus(sessionId, "セッションを再開中…", "info");
     processManager.resume(sessionId, state.cwd);
     registry.markAsManaged(sessionId);
     registry.markSuspended(sessionId, false);
@@ -92,12 +100,11 @@ export function activate(context: vscode.ExtensionContext): void {
     panelManager.pushSdkMessage(id, msg);
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
     if (id.startsWith("pending-")) return;
-    const m = msg as any;
-    if (m?.type === "assistant") {
-      const text = collectAssistantText(m);
+    if (isAssistantMessage(msg)) {
+      const text = extractAssistantSummary(msg);
       if (text) void managedStore.update(id, { lastAssistantText: text });
-    } else if (m?.type === "user") {
-      const text = collectUserText(m);
+    } else if (isUserMessage(msg)) {
+      const text = extractUserSummary(msg);
       if (text) void managedStore.update(id, { lastUserPrompt: text });
     }
   });
@@ -120,6 +127,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     treeView,
+    treeProvider,
     statusBar,
     vscode.commands.registerCommand(
       "claudeCodeManager.openSession",
@@ -218,7 +226,23 @@ export function activate(context: vscode.ExtensionContext): void {
         if (confirm !== "削除") return;
         await processManager.dispose(sessionId);
         await managedStore.remove(sessionId);
+        panelManager.disposePanel(sessionId);
         registry.removeSession(sessionId);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "claudeCodeManager.stopSession",
+      async (target: unknown) => {
+        const sessionId = resolveSessionId(target);
+        if (!sessionId) return;
+        if (!processManager.has(sessionId)) {
+          vscode.window.showInformationMessage(
+            "Claude Code Manager: 起動中のセッションではありません",
+          );
+          return;
+        }
+        await processManager.interrupt(sessionId);
+        panelManager.pushStatus(sessionId, "生成を中断しました", "info");
       },
     ),
     vscode.commands.registerCommand(
@@ -289,47 +313,47 @@ export function deactivate(): void {
   // Disposables are handled via context.subscriptions.
 }
 
+/**
+ * VSCode の command callback は引数の型が unknown。TreeItem からは
+ * `{ sessionId }` / `{ state: { sessionId } }` のいずれかで渡ってくる。
+ */
 const resolveSessionId = (target: unknown): string | undefined => {
   if (typeof target === "string") return target;
-  if (target && typeof target === "object") {
-    const obj = target as any;
-    if (typeof obj.sessionId === "string") return obj.sessionId;
-    if (obj.state && typeof obj.state.sessionId === "string")
-      return obj.state.sessionId;
+  if (!target || typeof target !== "object") return undefined;
+  const r = target as Record<string, unknown>;
+  if (typeof r.sessionId === "string") return r.sessionId;
+  const state = r.state;
+  if (state && typeof state === "object") {
+    const s = state as Record<string, unknown>;
+    if (typeof s.sessionId === "string") return s.sessionId;
   }
   return undefined;
 };
 
 const resolveCwd = (target: unknown): string | undefined => {
   if (typeof target === "string") return target;
-  if (target && typeof target === "object") {
-    const obj = target as any;
-    if (typeof obj.cwd === "string") return obj.cwd;
-    if (obj.entry && typeof obj.entry.cwd === "string") return obj.entry.cwd;
-    if (obj.state && typeof obj.state.cwd === "string") return obj.state.cwd;
+  if (!target || typeof target !== "object") return undefined;
+  const r = target as Record<string, unknown>;
+  if (typeof r.cwd === "string") return r.cwd;
+  const entry = r.entry;
+  if (entry && typeof entry === "object") {
+    const e = entry as Record<string, unknown>;
+    if (typeof e.cwd === "string") return e.cwd;
+  }
+  const state = r.state;
+  if (state && typeof state === "object") {
+    const s = state as Record<string, unknown>;
+    if (typeof s.cwd === "string") return s.cwd;
   }
   return undefined;
 };
 
-const collectAssistantText = (msg: any): string => {
-  const content = msg?.message?.content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
-    .map((c: any) => c.text as string)
-    .join("\n")
-    .trim()
-    .slice(0, 280);
-};
+const isAssistantMessage = (
+  msg: SDKMessage,
+): msg is Extract<SDKMessage, { type: "assistant" }> =>
+  msg?.type === "assistant";
 
-const collectUserText = (msg: any): string => {
-  const content = msg?.message?.content;
-  if (typeof content === "string") return content.slice(0, 280);
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
-    .map((c: any) => c.text as string)
-    .join("\n")
-    .trim()
-    .slice(0, 280);
-};
+const isUserMessage = (
+  msg: SDKMessage,
+): msg is Extract<SDKMessage, { type: "user" }> =>
+  msg?.type === "user";

@@ -3,6 +3,7 @@ import { FolderEntry, FolderStore, labelOf } from "../folders/store";
 import { HiddenStore } from "../sessions/hiddenStore";
 import { SessionRegistry } from "../sessions/registry";
 import { SessionState, SessionStatus } from "../sessions/types";
+import { truncate } from "../utils/text";
 
 type TreeNode = FolderNode | SessionNode | ActionNode;
 
@@ -80,10 +81,11 @@ class ActionNode extends vscode.TreeItem {
 }
 
 export class SessionsTreeProvider
-  implements vscode.TreeDataProvider<TreeNode>
+  implements vscode.TreeDataProvider<TreeNode>, vscode.Disposable
 {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  private timer: NodeJS.Timeout;
 
   constructor(
     private registry: SessionRegistry,
@@ -97,11 +99,19 @@ export class SessionsTreeProvider
       this._onDidChangeTreeData.fire(undefined),
     );
     folders.on("changed", () => this._onDidChangeTreeData.fire(undefined));
-    setInterval(() => this._onDidChangeTreeData.fire(undefined), 30_000);
+    this.timer = setInterval(
+      () => this._onDidChangeTreeData.fire(undefined),
+      30_000,
+    );
   }
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
+  }
+
+  dispose(): void {
+    clearInterval(this.timer);
+    this._onDidChangeTreeData.dispose();
   }
 
   getTreeItem(element: TreeNode): vscode.TreeItem {
@@ -251,6 +261,3 @@ const formatElapsed = (ms: number): string => {
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
 };
-
-const truncate = (text: string, max: number): string =>
-  text.length > max ? text.slice(0, max - 1).trimEnd() + "…" : text;

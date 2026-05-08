@@ -72,6 +72,12 @@ export class ProcessManager extends EventEmitter {
     return this.get(id)?.send(text) ?? false;
   }
 
+  async interrupt(id: string): Promise<void> {
+    const proc = this.map.get(id);
+    if (!proc) return;
+    await proc.interrupt();
+  }
+
   async dispose(id: string): Promise<void> {
     const proc = this.map.get(id);
     if (!proc) return;
@@ -105,13 +111,16 @@ export class ProcessManager extends EventEmitter {
       this.emit("error", id, err);
     });
     proc.on("disposed", () => {
-      const id = this.idFor(initialId);
-      this.map.delete(id);
+      // idFor は pendingToSid を参照するため、削除前に必ず解決する。
+      const confirmedId = this.idFor(initialId);
+      this.map.delete(confirmedId);
       // managedSids には残してもよいが、resume するまで無効。
       // ここでは即座に外して再 spawn 時に再登録する。
-      this.managedSids.delete(id);
+      this.managedSids.delete(confirmedId);
       this.pendingToSid.delete(initialId);
-      this.emit("disposed", id);
+      this.emit("disposed", confirmedId);
+      // EventEmitter 経由のリスナを残すと proc が GC されないため明示的に外す。
+      proc.removeAllListeners();
     });
   }
 

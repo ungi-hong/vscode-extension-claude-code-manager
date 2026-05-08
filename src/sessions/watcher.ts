@@ -78,7 +78,10 @@ export class SessionWatcher extends EventEmitter {
     const ageHours = (Date.now() - stat.mtimeMs) / 1000 / 60 / 60;
     const fallbackSessionId = path.basename(p, ".jsonl");
     if (ageHours > this.opts.initialMaxAgeHours) {
-      // Skip ancient files but remember offset so future writes wake them up.
+      // Old-file skip: initialMaxAgeHours より古い jsonl は初期スキャンを
+      // 飛ばし、offset だけ stat.size に進めておく。今後 fs writes が来た時
+      // のみ差分行が ingest されるため、放置ファイルは永遠に取り込まれない
+      // (= 意図通り。起動コストとメモリ消費を抑える)。
       this.states.set(p, {
         offset: stat.size,
         buffer: new JsonlBuffer(),

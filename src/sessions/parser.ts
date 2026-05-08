@@ -1,4 +1,12 @@
+import { truncate } from "../utils/text";
 import { RawJsonlLine, SessionEvent } from "./types";
+
+/**
+ * `RawJsonlLine` と SDK の `SDKAssistantMessage` / `SDKUserMessage` は
+ * いずれも `{ message: { content } }` 構造を共有するため、抽出ロジックは
+ * この構造的部分型で受ける。
+ */
+type MessageLike = { message?: { content?: unknown; stop_reason?: unknown } };
 
 /**
  * Buffer for incremental JSONL parsing. Keeps incomplete trailing lines
@@ -62,8 +70,8 @@ const parseTimestamp = (value: unknown): number => {
 /**
  * Extract the inner content array from an assistant or user message.
  */
-export const extractMessageContent = (raw: RawJsonlLine): any[] => {
-  const message = raw.message;
+export const extractMessageContent = (raw: MessageLike): any[] => {
+  const message = raw?.message;
   if (!message) return [];
   const content = message.content;
   if (typeof content === "string") return [{ type: "text", text: content }];
@@ -71,7 +79,7 @@ export const extractMessageContent = (raw: RawJsonlLine): any[] => {
   return [];
 };
 
-export const extractAssistantText = (raw: RawJsonlLine): string => {
+export const extractAssistantText = (raw: MessageLike): string => {
   return extractMessageContent(raw)
     .filter((c) => c?.type === "text" && typeof c.text === "string")
     .map((c) => c.text as string)
@@ -79,7 +87,7 @@ export const extractAssistantText = (raw: RawJsonlLine): string => {
     .trim();
 };
 
-export const extractUserText = (raw: RawJsonlLine): string => {
+export const extractUserText = (raw: MessageLike): string => {
   const parts = extractMessageContent(raw);
   const out: string[] = [];
   for (const c of parts) {
@@ -89,10 +97,23 @@ export const extractUserText = (raw: RawJsonlLine): string => {
   return out.join("\n").trim();
 };
 
-export const extractStopReason = (raw: RawJsonlLine): string | undefined => {
+export const extractStopReason = (raw: MessageLike): string | undefined => {
   const reason = raw?.message?.stop_reason;
   return typeof reason === "string" ? reason : undefined;
 };
+
+/**
+ * 拡張内チャットの "直近メッセージ" プレビュー用に長さ制限付きで抽出。
+ */
+export const extractAssistantSummary = (
+  raw: MessageLike,
+  max = 280,
+): string => truncate(extractAssistantText(raw), max);
+
+export const extractUserSummary = (
+  raw: MessageLike,
+  max = 280,
+): string => truncate(extractUserText(raw), max);
 
 export const extractToolUses = (
   raw: RawJsonlLine,
