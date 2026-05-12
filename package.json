@@ -104,6 +104,12 @@
         "title": "Stop Generating",
         "category": "Claude Code Manager",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "claudeCodeManager.showLogs",
+        "title": "Show Output Logs",
+        "category": "Claude Code Manager",
+        "icon": "$(output)"
       }
     ],
     "menus": {
@@ -122,6 +128,11 @@
           "command": "claudeCodeManager.showHiddenSessions",
           "when": "view == ccmgr.sessions",
           "group": "navigation@3"
+        },
+        {
+          "command": "claudeCodeManager.showLogs",
+          "when": "view == ccmgr.rabbit",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [

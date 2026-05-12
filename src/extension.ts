@@ -287,12 +287,29 @@ export function activate(context: vscode.ExtensionContext): void {
     const t = (msg as { type?: string })?.type ?? "?";
     output.appendLine(`[msg] sid=${id.slice(0, 8)} type=${t}`);
     if (t === "rate_limit_event") {
-      output.appendLine(`  rate_limit_info=${JSON.stringify((msg as any).rate_limit_info)}`);
+      output.appendLine(
+        `  rate_limit_info=${JSON.stringify((msg as any).rate_limit_info)}`,
+      );
     }
-    // SDK init を受けたら slash command 一覧を fetch して panel に流す
     if (t === "system" && (msg as { subtype?: string }).subtype === "init") {
+      // 認証モード等のデバッグ情報をログ。apiKeySource が "user" だと API key 直
+      // 認証なので rate_limit_event は飛んでこない。"oauth" なら claude.ai 経由。
+      const s = msg as any;
+      output.appendLine(
+        `  init: apiKeySource=${s.apiKeySource} model=${s.model} ver=${s.claude_code_version}`,
+      );
       pushCommandsToPanel(id, true);
     }
+
+    // ⚠ rate_limit_event はアカウント全体の情報なので、session_id が pending-
+    // (まだ promote されてない) の段階でも ingest する。早期 return の前で処理する。
+    if (isRateLimitEvent(msg)) {
+      const accepted = usageStore.ingestRateLimit(msg);
+      output.appendLine(
+        `  rate_limit ingest=${accepted ? "OK" : "REJECTED"}`,
+      );
+    }
+
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
     if (id.startsWith("pending-")) return;
     if (isAssistantMessage(msg)) {
@@ -303,9 +320,6 @@ export function activate(context: vscode.ExtensionContext): void {
       if (text) void managedStore.update(id, { lastUserPrompt: text });
     } else if (isResultMessage(msg)) {
       usageStore.ingestResult(id, msg);
-    } else if (isRateLimitEvent(msg)) {
-      // アカウント全体の rate limit (5h / 7d / Opus / Sonnet 各枠の utilization)
-      usageStore.ingestRateLimit(msg);
     }
   });
   processManager.on("disposed", (id) => {
@@ -345,6 +359,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("claudeCodeManager.refresh", () => {
       registry.recomputeAllStatuses();
       treeProvider.refresh();
+    }),
+    vscode.commands.registerCommand("claudeCodeManager.showLogs", () => {
+      output.show(true);
     }),
     vscode.commands.registerCommand(
       "claudeCodeManager.copySessionId",

@@ -244,6 +244,16 @@ export class RabbitWebviewProvider
       font-size: 0.9em;
     }
     .empty .big { font-size: 2em; display: block; margin-bottom: 6px; }
+    .hint {
+      margin-top: 12px;
+      padding: 8px 10px;
+      font-size: 0.78em;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-editorWidget-background);
+      border-left: 3px solid var(--vscode-charts-yellow, #d4a017);
+      border-radius: 3px;
+      line-height: 1.45;
+    }
   </style>
 </head>
 <body>
@@ -377,18 +387,12 @@ export class RabbitWebviewProvider
       const hasRateLimits = rls.length > 0;
       const hasBlock = !!state.block;
 
-      // うさぎ: rate_limit_event があるときだけ表示
-      const bunnyEl = document.querySelector('.bunny');
-      if (hasRateLimits) {
-        bunnyEl.style.display = '';
-        setBunny(state.usageRatio || 0);
-      } else {
-        bunnyEl.style.display = 'none';
-      }
+      // うさぎは常に表示。utilization データが無ければ rabbit-20 で固定。
+      setBunny(state.usageRatio || 0);
 
       const parts = [];
 
-      // 🔥 トークン (block 経由。block 無いと表示しない)
+      // 🔥 トークン (block 経由)。block 無くても 0 表示はしない
       if (hasBlock) {
         const pctSuffix = hasRateLimits
           ? ' (' + state.usagePct + '%)'
