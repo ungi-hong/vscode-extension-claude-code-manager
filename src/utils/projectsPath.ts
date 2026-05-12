@@ -19,3 +19,18 @@ export const projectBaseName = (cwd: string): string => {
   const base = path.basename(cwd);
   return base || cwd;
 };
+
+/**
+ * Encode a filesystem path into the directory name Claude uses:
+ *   /Users/foo/bar  →  -Users-foo-bar
+ * Mirror image of {@link decodeProjectDir}.
+ */
+export const encodeCwdToProjectDir = (cwd: string): string =>
+  cwd.replace(/\//g, "-");
+
+/**
+ * Absolute path of the JSONL file Claude writes for the given session under
+ * the given working directory: `~/.claude/projects/{encoded(cwd)}/{sid}.jsonl`.
+ */
+export const sessionJsonlPath = (cwd: string, sessionId: string): string =>
+  path.join(claudeProjectsRoot(), encodeCwdToProjectDir(cwd), `${sessionId}.jsonl`);

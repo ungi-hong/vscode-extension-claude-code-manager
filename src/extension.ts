@@ -9,13 +9,20 @@ import {
   extractUserSummary,
 } from "./sessions/parser";
 import { SessionRegistry } from "./sessions/registry";
+import { UsageStore } from "./sessions/usageStore";
 import { SessionWatcher } from "./sessions/watcher";
+import { sessionJsonlPath } from "./utils/projectsPath";
+import { RabbitWebviewProvider } from "./views/rabbitView";
 import { SessionsTreeProvider } from "./views/treeProvider";
 import { SessionPanelManager } from "./views/sessionPanel";
 import { StatusBar } from "./views/statusBar";
 
+import { statSync } from "fs";
+
 export function activate(context: vscode.ExtensionContext): void {
   const cfg = vscode.workspace.getConfiguration("claudeCodeManager");
+  const output = vscode.window.createOutputChannel("Claude Code Manager");
+  output.appendLine(`[ccmgr] activate at ${new Date().toISOString()}`);
   const registry = new SessionRegistry({
     staleAfterMinutes: cfg.get<number>("staleAfterMinutes", 30),
     maxEventsPerSession: cfg.get<number>("maxEventsPerSession", 200),
@@ -24,18 +31,39 @@ export function activate(context: vscode.ExtensionContext): void {
     initialMaxAgeHours: cfg.get<number>("hideSessionsOlderThanHours", 24),
   });
 
-  watcher.on("event", (evt) => registry.ingest(evt));
   watcher.on("error", (err) => {
     console.error("[ccmgr] watcher error", err);
   });
 
   const hiddenStore = new HiddenStore(context.globalState);
   const folders = new FolderStore(context.globalState);
-  const treeProvider = new SessionsTreeProvider(registry, hiddenStore, folders);
+  const usageStore = new UsageStore(context.globalState);
+
+  // 順序的に usageStore 宣言後に listener を登録 (const の TDZ 回避)
+  watcher.on("event", (evt) => {
+    registry.ingest(evt);
+    // assistant メッセージの usage を block 集計用にも流す
+    usageStore.ingestJsonlEvent(evt);
+  });
+
+  const treeProvider = new SessionsTreeProvider(
+    registry,
+    hiddenStore,
+    folders,
+    usageStore,
+  );
   const treeView = vscode.window.createTreeView("ccmgr.sessions", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
+  const rabbitProvider = new RabbitWebviewProvider(
+    context.extensionUri,
+    usageStore,
+  );
+  const rabbitRegistration = vscode.window.registerWebviewViewProvider(
+    RabbitWebviewProvider.viewType,
+    rabbitProvider,
+  );
   const updateTreeBadge = () => {
     const n = hiddenStore.size();
     treeView.description = n > 0 ? `${n} hidden` : undefined;
@@ -55,11 +83,47 @@ export function activate(context: vscode.ExtensionContext): void {
     registry.markSuspended(snap.sessionId, true);
   }
 
-  const ensureManagedProcess = (sessionId: string): boolean => {
-    if (processManager.has(sessionId)) return true;
+  /**
+   * 起動中ならそのまま、そうでなければ resume / create を試みる。
+   * 成功時は実際に "今アクティブな" id (resume 時は同 id, create fallback 時は
+   * 新しい pending- id) を返す。失敗時は undefined。
+   *
+   * Zombie session 対策: JSONL ファイルが 0 byte (= init 受信したが会話成立せず
+   * 履歴空) のセッションは claude バイナリが resume できないので、登録を消して
+   * 新規セッションを同じ cwd で create し直す。
+   */
+  const ensureManagedProcess = (sessionId: string): string | undefined => {
+    if (processManager.has(sessionId)) return sessionId;
     const state = registry.get(sessionId);
-    if (!state) return false;
-    if (sessionId.startsWith("pending-")) return false;
+    if (!state) return undefined;
+    if (sessionId.startsWith("pending-")) return undefined;
+
+    // 空 JSONL 検出: そのまま resume すると「No conversation found」エラーになる
+    const jsonlPath = sessionJsonlPath(state.cwd, sessionId);
+    let isZombie = false;
+    try {
+      isZombie = statSync(jsonlPath).size === 0;
+    } catch {
+      isZombie = true; // 存在しないも会話なしと同義に扱う
+    }
+
+    if (isZombie) {
+      output.appendLine(
+        `[ccmgr] zombie session detected sid=${sessionId.slice(0, 8)} (empty JSONL at ${jsonlPath}) — creating fresh session in same cwd`,
+      );
+      panelManager.pushStatus(
+        sessionId,
+        "履歴が空のため新規セッションに切り替えます…",
+        "info",
+      );
+      void managedStore.remove(sessionId);
+      registry.removeSession(sessionId);
+      const { id: newId } = processManager.create(state.cwd);
+      registry.registerManaged({ sessionId: newId, cwd: state.cwd });
+      panelManager.rekey(sessionId, newId);
+      return newId;
+    }
+
     // external または suspended な managed → resume で managed として再起動。
     // SDK の起動には数百 ms かかるため、Webview に進行状態を通知して
     // 「送信したのに無反応」と感じさせないようにする。
@@ -71,33 +135,41 @@ export function activate(context: vscode.ExtensionContext): void {
       sessionId,
       cwd: state.cwd,
     });
-    return true;
+    return sessionId;
   };
 
   const panelManager = new SessionPanelManager(context, registry, {
     onSubmit: (sessionId, text) => {
-      if (!ensureManagedProcess(sessionId)) {
+      const activeId = ensureManagedProcess(sessionId);
+      if (!activeId) {
         vscode.window.showWarningMessage(
           "Claude Code Manager: このセッションを起動できません",
         );
         return;
       }
-      processManager.send(sessionId, text);
+      processManager.send(activeId, text);
     },
     onResume: (sessionId) => {
       ensureManagedProcess(sessionId);
     },
   });
 
-  // ProcessManager のイベントを Tree / Panel / Persistence に橋渡し。
+  // ProcessManager のイベントを Tree / Panel / Persistence / UsageStore に橋渡し。
   processManager.on("promoted", ({ pendingId, sessionId }) => {
     registry.promotePending(pendingId, sessionId);
     panelManager.rekey(pendingId, sessionId);
+    usageStore.rename(pendingId, sessionId);
     const cwd = registry.get(sessionId)?.cwd ?? "";
     void managedStore.record({ sessionId, cwd });
   });
   processManager.on("message", (id, msg) => {
     panelManager.pushSdkMessage(id, msg);
+    // デバッグ: 来てる SDKMessage の type を全部記録 (rate_limit_event の到来確認用)
+    const t = (msg as { type?: string })?.type ?? "?";
+    output.appendLine(`[msg] sid=${id.slice(0, 8)} type=${t}`);
+    if (t === "rate_limit_event") {
+      output.appendLine(`  rate_limit_info=${JSON.stringify((msg as any).rate_limit_info)}`);
+    }
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
     if (id.startsWith("pending-")) return;
     if (isAssistantMessage(msg)) {
@@ -106,6 +178,11 @@ export function activate(context: vscode.ExtensionContext): void {
     } else if (isUserMessage(msg)) {
       const text = extractUserSummary(msg);
       if (text) void managedStore.update(id, { lastUserPrompt: text });
+    } else if (isResultMessage(msg)) {
+      usageStore.ingestResult(id, msg);
+    } else if (isRateLimitEvent(msg)) {
+      // アカウント全体の rate limit (5h / 7d / Opus / Sonnet 各枠の utilization)
+      usageStore.ingestRateLimit(msg);
     }
   });
   processManager.on("disposed", (id) => {
@@ -123,11 +200,14 @@ export function activate(context: vscode.ExtensionContext): void {
     );
   });
 
-  const statusBar = new StatusBar(registry);
+  const statusBar = new StatusBar(registry, usageStore);
 
   context.subscriptions.push(
+    output,
     treeView,
     treeProvider,
+    rabbitRegistration,
+    rabbitProvider,
     statusBar,
     vscode.commands.registerCommand(
       "claudeCodeManager.openSession",
@@ -228,6 +308,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await managedStore.remove(sessionId);
         panelManager.disposePanel(sessionId);
         registry.removeSession(sessionId);
+        usageStore.dispose(sessionId);
       },
     ),
     vscode.commands.registerCommand(
@@ -305,6 +386,7 @@ export function activate(context: vscode.ExtensionContext): void {
       void watcher.stop();
       void processManager.disposeAll();
       folders.dispose();
+      usageStore.dispose();
     },
   });
 }
@@ -357,3 +439,13 @@ const isUserMessage = (
   msg: SDKMessage,
 ): msg is Extract<SDKMessage, { type: "user" }> =>
   msg?.type === "user";
+
+const isResultMessage = (
+  msg: SDKMessage,
+): msg is Extract<SDKMessage, { type: "result" }> =>
+  msg?.type === "result";
+
+const isRateLimitEvent = (
+  msg: SDKMessage,
+): msg is Extract<SDKMessage, { type: "rate_limit_event" }> =>
+  msg?.type === "rate_limit_event";

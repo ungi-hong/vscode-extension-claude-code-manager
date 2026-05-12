@@ -3,7 +3,8 @@ import { FolderEntry, FolderStore, labelOf } from "../folders/store";
 import { HiddenStore } from "../sessions/hiddenStore";
 import { SessionRegistry } from "../sessions/registry";
 import { SessionState, SessionStatus } from "../sessions/types";
-import { truncate } from "../utils/text";
+import { SessionUsage, UsageStore } from "../sessions/usageStore";
+import { formatTokens, truncate } from "../utils/text";
 
 type TreeNode = FolderNode | SessionNode | ActionNode;
 
@@ -33,14 +34,17 @@ class FolderNode extends vscode.TreeItem {
 
 class SessionNode extends vscode.TreeItem {
   readonly kind = "session" as const;
-  constructor(public readonly state: SessionState) {
+  constructor(
+    public readonly state: SessionState,
+    usage: SessionUsage | undefined,
+  ) {
     super(buildLabel(state), vscode.TreeItemCollapsibleState.None);
     this.id = `session:${state.sessionId}`;
     this.contextValue =
       state.origin === "managed" ? "session.managed" : "session.external";
     this.iconPath = iconForState(state);
-    this.description = buildDescription(state);
-    this.tooltip = buildTooltip(state);
+    this.description = buildDescription(state, usage);
+    this.tooltip = buildTooltip(state, usage);
     this.command = {
       command: "claudeCodeManager.openSession",
       title: "Open Session",
@@ -86,11 +90,13 @@ export class SessionsTreeProvider
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private timer: NodeJS.Timeout;
+  private debounceTimer?: NodeJS.Timeout;
 
   constructor(
     private registry: SessionRegistry,
     private hiddenStore: HiddenStore,
     private folders: FolderStore,
+    private usageStore: UsageStore,
   ) {
     registry.on("changed", () => this._onDidChangeTreeData.fire(undefined));
     registry.on("removed", () => this._onDidChangeTreeData.fire(undefined));
@@ -99,6 +105,8 @@ export class SessionsTreeProvider
       this._onDidChangeTreeData.fire(undefined),
     );
     folders.on("changed", () => this._onDidChangeTreeData.fire(undefined));
+    // 複数 managed セッション同時 result 連発時の再描画を 200ms 圧縮
+    usageStore.on("changed", () => this.scheduleDebouncedRefresh());
     this.timer = setInterval(
       () => this._onDidChangeTreeData.fire(undefined),
       30_000,
@@ -111,7 +119,16 @@ export class SessionsTreeProvider
 
   dispose(): void {
     clearInterval(this.timer);
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this._onDidChangeTreeData.dispose();
+  }
+
+  private scheduleDebouncedRefresh(): void {
+    if (this.debounceTimer) return;
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = undefined;
+      this._onDidChangeTreeData.fire(undefined);
+    }, 200);
   }
 
   getTreeItem(element: TreeNode): vscode.TreeItem {
@@ -151,7 +168,9 @@ export class SessionsTreeProvider
       return [...folderNodes, new ActionNode("addFolder")];
     }
     if (element.kind === "folder") {
-      const sessionItems = element.sessions.map((s) => new SessionNode(s));
+      const sessionItems = element.sessions.map(
+        (s) => new SessionNode(s, this.usageStore.get(s.sessionId)),
+      );
       return [new ActionNode("newSession", element.entry.cwd), ...sessionItems];
     }
     return [];
@@ -163,17 +182,25 @@ const buildLabel = (s: SessionState): string => {
   return `${statusGlyph(s)} ${s.sessionId.slice(0, 8)}${branch}`;
 };
 
-const buildDescription = (s: SessionState): string => {
+const buildDescription = (
+  s: SessionState,
+  usage: SessionUsage | undefined,
+): string => {
   const preview = s.lastAssistantText ?? s.lastUserPrompt ?? "";
   const compact = preview.replace(/\s+/g, " ").trim();
   const elapsed = formatElapsed(Date.now() - s.lastEventAt);
   // managed = 拡張内チャット可 / external = 外部 (jsonl 観測のみ、直接対話できない)
   const tag = s.origin === "managed" ? "chat" : "履歴";
   const head = compact ? `「${truncate(compact, 60)}」` : "";
-  return [tag, head, elapsed].filter(Boolean).join(" · ");
+  // managed セッションのみ token サマリを表示。external は `—` で揃える。
+  const tokens = formatSessionTokens(s, usage);
+  return [tag, head, tokens, elapsed].filter(Boolean).join(" · ");
 };
 
-const buildTooltip = (s: SessionState): vscode.MarkdownString => {
+const buildTooltip = (
+  s: SessionState,
+  usage: SessionUsage | undefined,
+): vscode.MarkdownString => {
   const md = new vscode.MarkdownString();
   md.isTrusted = false;
   md.supportThemeIcons = true;
@@ -188,6 +215,19 @@ const buildTooltip = (s: SessionState): vscode.MarkdownString => {
   md.appendMarkdown(
     `**Last event**: ${new Date(s.lastEventAt).toLocaleString()}`,
   );
+  if (usage && usage.contextWindow > 0) {
+    const used = formatTokens(usage.totalTokens);
+    const max = formatTokens(usage.contextWindow);
+    const remaining = formatTokens(usage.contextWindow - usage.totalTokens);
+    md.appendMarkdown(
+      `\n\n---\n\n**Tokens**: ${used} / ${max} (残り ${remaining})\n\n`,
+    );
+    md.appendMarkdown(`**Cost**: $${usage.totalCostUsd.toFixed(4)}`);
+  } else if (usage && usage.totalCostUsd > 0) {
+    md.appendMarkdown(
+      `\n\n---\n\n**Cost**: $${usage.totalCostUsd.toFixed(4)}`,
+    );
+  }
   if (s.lastUserPrompt) {
     md.appendMarkdown(`\n\n---\n\n**User**: ${truncate(s.lastUserPrompt, 200)}`);
   }
@@ -261,3 +301,13 @@ const formatElapsed = (ms: number): string => {
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
 };
+
+const formatSessionTokens = (
+  s: SessionState,
+  usage: SessionUsage | undefined,
+): string => {
+  if (s.origin !== "managed") return "—";
+  if (!usage || usage.contextWindow === 0) return "";
+  return `${formatTokens(usage.totalTokens)}/${formatTokens(usage.contextWindow)}`;
+};
+

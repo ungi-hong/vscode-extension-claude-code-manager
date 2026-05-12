@@ -1,21 +1,25 @@
 import * as vscode from "vscode";
 import { SessionRegistry } from "../sessions/registry";
+import { UsageStore } from "../sessions/usageStore";
 
 export class StatusBar implements vscode.Disposable {
   private item: vscode.StatusBarItem;
   private timer: NodeJS.Timeout;
 
-  constructor(private registry: SessionRegistry) {
+  constructor(
+    private registry: SessionRegistry,
+    private usageStore: UsageStore,
+  ) {
     this.item = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Left,
       120,
     );
     this.item.command = "claudeCodeManager.focusSidebar";
-    this.item.tooltip = "Claude Code Manager: クリックでサイドバーを開く";
     this.item.show();
 
     registry.on("changed", () => this.refresh());
     registry.on("snapshot", () => this.refresh());
+    usageStore.on("changed", () => this.refresh());
     this.timer = setInterval(() => this.refresh(), 30_000);
     this.refresh();
   }
@@ -35,6 +39,20 @@ export class StatusBar implements vscode.Disposable {
     } else {
       this.item.text = `$(robot) CC: ${parts.join(" · ")}`;
     }
+
+    const tooltip = new vscode.MarkdownString();
+    tooltip.isTrusted = false;
+    tooltip.supportThemeIcons = true;
+    tooltip.appendMarkdown(
+      "Claude Code Manager — クリックでサイドバーを開く\n\n",
+    );
+    const summary = this.usageStore.summary();
+    if (summary.totalCostUsd > 0) {
+      tooltip.appendMarkdown(
+        `**合計 cost**: $${summary.totalCostUsd.toFixed(4)}\n`,
+      );
+    }
+    this.item.tooltip = tooltip;
   }
 
   dispose(): void {

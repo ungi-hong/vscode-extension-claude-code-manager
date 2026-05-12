@@ -31,6 +31,12 @@
           "name": "Sessions",
           "icon": "media/icon.svg",
           "contextualTitle": "Claude Code Sessions"
+        },
+        {
+          "id": "ccmgr.rabbit",
+          "name": "🐰 トークン使用率",
+          "type": "webview",
+          "contextualTitle": "Token Usage"
         }
       ]
     },
