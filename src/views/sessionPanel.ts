@@ -1,14 +1,32 @@
 import * as fs from "fs";
 import * as vscode from "vscode";
+import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { SessionRegistry } from "../sessions/registry";
 import { SessionEvent, SessionState } from "../sessions/types";
 import { JsonlBuffer, toSessionEvent } from "../sessions/parser";
+import { sessionJsonlPath } from "../utils/projectsPath";
+
+/** Webview に流す slash command 1 件分。SDK 由来 + ユーザー定義 + プラグインの合成型。 */
+export interface PanelSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
+  aliases?: string[];
+  /** ユーザー定義は "user" / "project" / "plugin"。SDK 組み込みは undefined。 */
+  source?: "user" | "project" | "plugin";
+  /** plugin 由来時の plugin 名。 */
+  plugin?: string;
+}
 
 export interface PanelActions {
   /** Webview からのユーザー入力。managed セッションのみで呼ばれる前提。 */
   onSubmit?: (sessionId: string, text: string) => void;
   /** Webview の "Resume" 操作 (suspended な managed セッションを再起動)。 */
   onResume?: (sessionId: string) => void;
+  /** Shift+Tab で次のモードへ循環したいリクエスト。 */
+  onCycleMode?: (sessionId: string) => void;
+  /** panel が表示直後に「いまのモード送って」と要求してきたら呼ばれる。 */
+  onRequestMode?: (sessionId: string) => void;
 }
 
 export class SessionPanelManager {
@@ -83,6 +101,20 @@ export class SessionPanelManager {
     if (!panel) return;
     panel.pushStatus(text, kind);
   }
+
+  /** 現在の permission モードを webview の右下バッジに反映させる。 */
+  pushMode(sessionId: string, mode: PermissionMode): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.pushMode(mode);
+  }
+
+  /** Slash command の補完候補一覧を webview に流す (1 セッションに 1 回想定)。 */
+  pushCommands(sessionId: string, commands: PanelSlashCommand[]): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.pushCommands(commands);
+  }
 }
 
 class SessionPanel {
@@ -140,13 +172,27 @@ class SessionPanel {
   }
 
   bootstrap(): void {
-    // managed の新規セッション (filePath 未確定) は jsonl replay をスキップ
-    if (!this.initialState.filePath) {
+    // filePath 未設定でも、cwd + sessionId から JSONL を探して replay を試みる。
+    // (watcher が古いファイルを初期 load してない場合や、managedStore 復元時に
+    //  filePath を埋め忘れたケースのフォールバック)
+    let filePath = this.initialState.filePath;
+    if (!filePath && this.initialState.cwd && !this.initialState.sessionId.startsWith("pending-")) {
+      const candidate = sessionJsonlPath(
+        this.initialState.cwd,
+        this.initialState.sessionId,
+      );
+      try {
+        if (fs.statSync(candidate).size > 0) filePath = candidate;
+      } catch {
+        // 存在しないなら諦め
+      }
+    }
+    if (!filePath) {
       this.bootstrapped = true;
       this.postState(this.initialState);
       return;
     }
-    void this.replayJsonl(this.initialState).finally(() => {
+    void this.replayJsonl({ ...this.initialState, filePath }).finally(() => {
       this.bootstrapped = true;
       this.postState(this.initialState);
     });
@@ -168,6 +214,22 @@ class SessionPanel {
 
   pushStatus(text: string, kind: "info" | "error"): void {
     this.panel.webview.postMessage({ type: "status", text, kind });
+  }
+
+  pushMode(mode: PermissionMode): void {
+    this.panel.webview.postMessage({ type: "mode", mode });
+  }
+
+  pushCommands(commands: PanelSlashCommand[]): void {
+    const stripped = commands.map((c) => ({
+      name: c.name,
+      description: c.description,
+      argumentHint: c.argumentHint,
+      aliases: c.aliases,
+      source: c.source,
+      plugin: c.plugin,
+    }));
+    this.panel.webview.postMessage({ type: "commands", commands: stripped });
   }
 
   private async replayJsonl(state: SessionState): Promise<void> {
@@ -216,6 +278,8 @@ class SessionPanel {
     if (!msg || typeof msg.command !== "string") return;
     switch (msg.command) {
       case "ready":
+        // panel が表示完了 → 現在のモードを再送するよう extension に依頼
+        this.actions.onRequestMode?.(this.currentSessionId);
         break;
       case "submit": {
         const text = typeof msg.text === "string" ? msg.text.trim() : "";
@@ -225,6 +289,9 @@ class SessionPanel {
       }
       case "resume":
         this.actions.onResume?.(this.currentSessionId);
+        break;
+      case "cycleMode":
+        this.actions.onCycleMode?.(this.currentSessionId);
         break;
     }
   }
@@ -273,9 +340,13 @@ class SessionPanel {
   </header>
   <main id="log" class="ccmgr-log"></main>
   <footer class="ccmgr-input" id="input-bar">
-    <textarea id="input-text" placeholder="Cmd+Enter で送信" rows="3"></textarea>
+    <div class="input-wrap">
+      <textarea id="input-text" placeholder="Cmd+Enter で送信 (Shift+Tab でモード切替・/ でコマンド)" rows="3"></textarea>
+      <div class="slash-dropdown" id="slash-dropdown" hidden></div>
+    </div>
     <div class="input-actions">
       <span class="input-hint" id="input-hint"></span>
+      <span class="mode-badge" id="mode-badge" data-mode="default" title="Shift+Tab で切替">● Default</span>
       <button id="btn-submit">Send</button>
     </div>
   </footer>

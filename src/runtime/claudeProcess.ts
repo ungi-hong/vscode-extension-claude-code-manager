@@ -1,14 +1,18 @@
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
 import type {
+  PermissionMode,
   Query,
   SDKMessage,
   SDKUserMessage,
+  SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 
 export interface ClaudeProcessOptions {
   cwd: string;
   resumeSessionId?: string;
+  /** SDK の query() に渡す初期権限モード。途中で `setPermissionMode` で変更可能。 */
+  permissionMode?: PermissionMode;
 }
 
 export declare interface ClaudeProcess {
@@ -58,6 +62,7 @@ export class ClaudeProcess extends EventEmitter {
   private async startInternal(): Promise<void> {
     const sdk = await import("@anthropic-ai/claude-agent-sdk");
     const userInput = this.makeUserInputStream();
+    const mode = this.options.permissionMode;
     const q = sdk.query({
       prompt: userInput,
       options: {
@@ -68,10 +73,29 @@ export class ClaudeProcess extends EventEmitter {
         ...(this.options.resumeSessionId
           ? { resume: this.options.resumeSessionId }
           : {}),
+        ...(mode
+          ? {
+              permissionMode: mode,
+              // bypassPermissions モードは SDK 側で「危険」フラグ必須。
+              ...(mode === "bypassPermissions"
+                ? { allowDangerouslySkipPermissions: true }
+                : {}),
+            }
+          : {}),
       },
     });
     this.currentQuery = q;
     void this.consume(q);
+  }
+
+  /** 実行中セッションの権限モードを切り替える (Shift+Tab 連動)。 */
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
+    await this.currentQuery?.setPermissionMode(mode);
+  }
+
+  /** SDK 側で有効な slash command の一覧を取得する。 */
+  async getSupportedCommands(): Promise<SlashCommand[]> {
+    return (await this.currentQuery?.supportedCommands()) ?? [];
   }
 
   send(text: string): boolean {

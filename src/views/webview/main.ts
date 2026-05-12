@@ -21,6 +21,67 @@ const inputBar = document.getElementById("input-bar") as HTMLElement;
 const inputText = document.getElementById("input-text") as HTMLTextAreaElement;
 const inputHint = document.getElementById("input-hint") as HTMLElement;
 const btnSubmit = document.getElementById("btn-submit") as HTMLButtonElement;
+const modeBadge = document.getElementById("mode-badge") as HTMLElement;
+const slashDropdown = document.getElementById("slash-dropdown") as HTMLElement;
+
+type PermissionMode =
+  | "default"
+  | "plan"
+  | "acceptEdits"
+  | "bypassPermissions";
+
+interface SlashCommandLite {
+  name: string;
+  description: string;
+  argumentHint: string;
+  aliases?: string[];
+  /** "user" / "project" / "plugin" / undefined (built-in) */
+  source?: "user" | "project" | "plugin";
+  /** plugin 由来時の plugin 名 */
+  plugin?: string;
+}
+
+const MODE_BADGE: Record<PermissionMode, { label: string; icon: string }> = {
+  default: { label: "Default", icon: "●" },
+  acceptEdits: { label: "Accept Edits", icon: "⚡" },
+  plan: { label: "Plan", icon: "📋" },
+  bypassPermissions: { label: "Bypass", icon: "⚠" },
+};
+
+/**
+ * Claude Code CLI 標準の slash command 静的フォールバック。
+ * SDK の `supportedCommands()` が返ってくる前に `/` を打っても dropdown が
+ * 出るようにするためのデフォルト。SDK から本物リストが来たら上書きされる。
+ */
+const FALLBACK_COMMANDS: SlashCommandLite[] = [
+  { name: "help", description: "ヘルプを表示", argumentHint: "" },
+  { name: "clear", description: "会話履歴をクリア", argumentHint: "" },
+  { name: "compact", description: "会話履歴を要約して圧縮", argumentHint: "[focus]" },
+  { name: "cost", description: "現在の会話のコストを表示", argumentHint: "" },
+  { name: "model", description: "モデルを切替 (例: sonnet/opus)", argumentHint: "<model>" },
+  { name: "init", description: "プロジェクト初期化 (CLAUDE.md 等)", argumentHint: "" },
+  { name: "usage", description: "使用量・残り枠を表示", argumentHint: "" },
+  { name: "memory", description: "メモリを編集", argumentHint: "" },
+  { name: "review", description: "コードレビューを実行", argumentHint: "" },
+  { name: "diff", description: "現在の差分を表示", argumentHint: "" },
+  { name: "agents", description: "利用可能なエージェントを表示", argumentHint: "" },
+  { name: "doctor", description: "環境チェックを実行", argumentHint: "" },
+  { name: "config", description: "設定を表示・変更", argumentHint: "" },
+  { name: "context", description: "コンテキスト情報を表示", argumentHint: "" },
+  { name: "status", description: "セッション情報を表示", argumentHint: "" },
+  { name: "todos", description: "TODO 一覧を表示", argumentHint: "" },
+  { name: "hooks", description: "hooks 設定を編集", argumentHint: "" },
+  { name: "mcp", description: "MCP サーバ一覧", argumentHint: "" },
+  { name: "bug", description: "バグ報告", argumentHint: "" },
+  { name: "exit", description: "セッションを終了", argumentHint: "" },
+];
+
+let slashCommands: SlashCommandLite[] = FALLBACK_COMMANDS.slice();
+let slashState: { active: boolean; query: string; selected: number } = {
+  active: false,
+  query: "",
+  selected: 0,
+};
 
 const renderedToolUses = new Map<string, HTMLElement>();
 const renderedMessages = new Set<string>();
@@ -43,16 +104,186 @@ window.addEventListener("message", (event) => {
   else if (msg.type === "status") {
     if (msg.kind === "error") hideThinking();
     showStatusLine(msg.text, msg.kind ?? "info");
+  } else if (msg.type === "mode") {
+    applyMode(msg.mode as PermissionMode);
+  } else if (msg.type === "commands") {
+    const incoming = (msg.commands ?? []) as SlashCommandLite[];
+    // SDK が有効なリストを返したらフォールバックを置き換え。空なら静的を保つ。
+    if (incoming.length > 0) {
+      slashCommands = incoming;
+    }
+    if (slashState.active) renderSlashDropdown();
   }
 });
 
 btnSubmit.addEventListener("click", submitInput);
 inputText.addEventListener("keydown", (ev) => {
+  // 1. Slash dropdown が開いてる時は dropdown のキー操作を最優先
+  if (slashState.active) {
+    const filtered = filteredSlash();
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (filtered.length > 0) {
+        slashState.selected = (slashState.selected + 1) % filtered.length;
+        renderSlashDropdown();
+      }
+      return;
+    }
+    if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (filtered.length > 0) {
+        slashState.selected =
+          (slashState.selected - 1 + filtered.length) % filtered.length;
+        renderSlashDropdown();
+      }
+      return;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") {
+      if (filtered.length > 0) {
+        ev.preventDefault();
+        acceptSlash(filtered[slashState.selected]);
+        return;
+      }
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeSlash();
+      return;
+    }
+  }
+
+  // 2. Shift+Tab: モードサイクル
+  if (ev.key === "Tab" && ev.shiftKey) {
+    ev.preventDefault();
+    vscode.postMessage({ command: "cycleMode" });
+    return;
+  }
+
+  // 3. 既存: Cmd/Ctrl+Enter で送信
   if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
     ev.preventDefault();
     submitInput();
   }
 });
+
+// 入力変化を見て slash dropdown の open/filter を判定
+inputText.addEventListener("input", () => {
+  const v = inputText.value;
+  // 「行頭が / で始まる、最初の行のみ評価」(textarea で複数行入力途中の / は無視)
+  const firstLine = v.split("\n", 1)[0];
+  if (firstLine.startsWith("/")) {
+    slashState.active = true;
+    slashState.query = firstLine.slice(1);
+    if (slashState.selected >= filteredSlash().length) slashState.selected = 0;
+    renderSlashDropdown();
+  } else if (slashState.active) {
+    closeSlash();
+  }
+});
+
+function applyMode(mode: PermissionMode): void {
+  const info = MODE_BADGE[mode];
+  if (!info) return;
+  modeBadge.textContent = `${info.icon} ${info.label}`;
+  modeBadge.dataset.mode = mode;
+}
+
+/**
+ * 部分一致 (substring) フィルタ + 優先度ソート。
+ *   0: name が前方一致 (最も近い)
+ *   1: alias が前方一致
+ *   2: name に部分一致
+ *   3: alias に部分一致
+ *   4: description に部分一致
+ * 同点は name アルファベット順。
+ */
+function filteredSlash(): SlashCommandLite[] {
+  const q = slashState.query.toLowerCase();
+  if (!q) return slashCommands;
+  const scored: { cmd: SlashCommandLite; score: number }[] = [];
+  for (const c of slashCommands) {
+    const name = c.name.toLowerCase();
+    const desc = c.description.toLowerCase();
+    const aliasesLow = (c.aliases ?? []).map((a) => a.toLowerCase());
+    let score = -1;
+    if (name.startsWith(q)) score = 0;
+    else if (aliasesLow.some((a) => a.startsWith(q))) score = 1;
+    else if (name.includes(q)) score = 2;
+    else if (aliasesLow.some((a) => a.includes(q))) score = 3;
+    else if (desc.includes(q)) score = 4;
+    if (score >= 0) scored.push({ cmd: c, score });
+  }
+  scored.sort(
+    (a, b) => a.score - b.score || a.cmd.name.localeCompare(b.cmd.name),
+  );
+  return scored.map((s) => s.cmd);
+}
+
+function renderSlashDropdown(): void {
+  const items = filteredSlash();
+  if (items.length === 0) {
+    slashDropdown.hidden = true;
+    slashDropdown.innerHTML = "";
+    return;
+  }
+  slashDropdown.hidden = false;
+  slashDropdown.innerHTML = items
+    .map((c, i) => {
+      const cls = i === slashState.selected ? "slash-item active" : "slash-item";
+      const hint = c.argumentHint
+        ? `<span class="slash-hint">${escapeHtml(c.argumentHint)}</span>`
+        : "";
+      const srcBadge = c.source
+        ? `<span class="slash-source slash-source-${c.source}">${c.source}</span>`
+        : "";
+      return `<div class="${cls}" data-index="${i}">
+        <span class="slash-name">/${escapeHtml(c.name)}</span>
+        ${srcBadge}
+        ${hint}
+        <span class="slash-desc">${escapeHtml(c.description)}</span>
+      </div>`;
+    })
+    .join("");
+  // クリック選択
+  slashDropdown.querySelectorAll(".slash-item").forEach((el) => {
+    el.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const idx = Number((el as HTMLElement).dataset.index);
+      const list = filteredSlash();
+      if (list[idx]) acceptSlash(list[idx]);
+    });
+  });
+}
+
+function acceptSlash(cmd: SlashCommandLite): void {
+  // 行頭の slash 行だけ書き換えて、続きの行は維持。引数が必要そうなら trailing space を入れる
+  const lines = inputText.value.split("\n");
+  const needsArg = !!cmd.argumentHint;
+  lines[0] = `/${cmd.name}${needsArg ? " " : ""}`;
+  inputText.value = lines.join("\n");
+  closeSlash();
+  // カーソルを slash 行末尾へ
+  const pos = lines[0].length;
+  inputText.setSelectionRange(pos, pos);
+  inputText.focus();
+}
+
+function closeSlash(): void {
+  slashState.active = false;
+  slashState.query = "";
+  slashState.selected = 0;
+  slashDropdown.hidden = true;
+  slashDropdown.innerHTML = "";
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 function submitInput() {
   const text = inputText.value.trim();

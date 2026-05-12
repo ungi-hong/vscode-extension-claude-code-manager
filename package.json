@@ -179,6 +179,18 @@
           "type": "number",
           "default": 200,
           "description": "registry が保持する 1 セッションあたりの直近イベント数 (Webview で全件必要なら都度 jsonl から再ロード)"
+        },
+        "claudeCodeManager.defaultPermissionMode": {
+          "type": "string",
+          "enum": ["default", "plan", "acceptEdits", "bypassPermissions"],
+          "enumDescriptions": [
+            "通常モード (毎回確認)",
+            "Plan モード (読み取り専用、変更案の提示のみ)",
+            "Auto-accept edits (ファイル編集を自動承認)",
+            "--dangerously-skip-permissions 相当 (全権限スキップ・自己責任)"
+          ],
+          "default": "default",
+          "description": "新規セッション起動時のデフォルト権限モード。Webview 入力欄にフォーカスして Shift+Tab で実行中にもサイクル切替できる"
         }
       }
     }

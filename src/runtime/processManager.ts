@@ -1,7 +1,15 @@
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  PermissionMode,
+  SDKMessage,
+  SlashCommand,
+} from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeProcess } from "./claudeProcess";
+
+export interface SpawnOptions {
+  permissionMode?: PermissionMode;
+}
 
 export interface CreateResult {
   /**
@@ -34,25 +42,39 @@ export class ProcessManager extends EventEmitter {
   /** 拡張が管理している = managed なすべての sessionId */
   private managedSids = new Set<string>();
 
-  create(cwd: string): CreateResult {
+  create(cwd: string, opts?: SpawnOptions): CreateResult {
     const pendingId = `pending-${randomUUID()}`;
-    const proc = new ClaudeProcess({ cwd });
+    const proc = new ClaudeProcess({ cwd, permissionMode: opts?.permissionMode });
     this.wire(pendingId, proc);
     this.map.set(pendingId, proc);
     proc.start();
     return { id: pendingId, process: proc };
   }
 
-  resume(sessionId: string, cwd: string): CreateResult {
+  resume(sessionId: string, cwd: string, opts?: SpawnOptions): CreateResult {
     if (this.map.has(sessionId)) {
       return { id: sessionId, process: this.map.get(sessionId)! };
     }
-    const proc = new ClaudeProcess({ cwd, resumeSessionId: sessionId });
+    const proc = new ClaudeProcess({
+      cwd,
+      resumeSessionId: sessionId,
+      permissionMode: opts?.permissionMode,
+    });
     this.wire(sessionId, proc);
     this.map.set(sessionId, proc);
     this.managedSids.add(sessionId);
     proc.start();
     return { id: sessionId, process: proc };
+  }
+
+  /** 起動中セッションの権限モードを切替 (Shift+Tab)。プロセス無いと no-op。 */
+  async setPermissionMode(id: string, mode: PermissionMode): Promise<void> {
+    await this.map.get(id)?.setPermissionMode(mode);
+  }
+
+  /** SDK の supportedCommands() を委譲。プロセス無いと空配列。 */
+  async getSupportedCommands(id: string): Promise<SlashCommand[]> {
+    return (await this.map.get(id)?.getSupportedCommands()) ?? [];
   }
 
   get(id: string): ClaudeProcess | undefined {

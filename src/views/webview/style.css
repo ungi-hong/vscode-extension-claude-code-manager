@@ -304,3 +304,114 @@ body {
   cursor: not-allowed;
   opacity: 0.55;
 }
+
+/* ===== Mode badge (Shift+Tab で循環) ===== */
+.mode-badge {
+  font-size: 0.78em;
+  padding: 3px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: help;
+  user-select: none;
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-panel-border);
+}
+.mode-badge[data-mode="default"] {
+  color: var(--vscode-descriptionForeground);
+}
+.mode-badge[data-mode="acceptEdits"] {
+  color: var(--vscode-charts-green, #28a745);
+  border-color: var(--vscode-charts-green, #28a745);
+}
+.mode-badge[data-mode="plan"] {
+  color: var(--vscode-charts-blue, #4c9aff);
+  border-color: var(--vscode-charts-blue, #4c9aff);
+}
+.mode-badge[data-mode="bypassPermissions"] {
+  color: var(--vscode-charts-red, #f48771);
+  border-color: var(--vscode-charts-red, #f48771);
+  font-weight: 700;
+}
+
+/* ===== Slash command dropdown ===== */
+.input-wrap {
+  position: relative;
+}
+.slash-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+}
+.slash-dropdown[hidden] {
+  display: none;
+}
+.slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 0.88em;
+}
+.slash-item:hover,
+.slash-item.active {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+.slash-name {
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 600;
+  color: var(--vscode-textLink-foreground);
+}
+.slash-item.active .slash-name {
+  color: inherit;
+}
+.slash-hint {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+.slash-source {
+  font-size: 0.7em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+}
+.slash-source-user {
+  color: var(--vscode-charts-purple, #b392f0);
+}
+.slash-source-project {
+  color: var(--vscode-charts-blue, #4c9aff);
+}
+.slash-source-plugin {
+  color: var(--vscode-charts-orange, #ffa657);
+}
+.slash-item.active .slash-source {
+  opacity: 1;
+}
+.slash-desc {
+  margin-left: auto;
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+.slash-item.active .slash-desc,
+.slash-item.active .slash-hint {
+  color: inherit;
+  opacity: 0.85;
+}
