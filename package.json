@@ -110,6 +110,18 @@
         "title": "Show Output Logs",
         "category": "Claude Code Manager",
         "icon": "$(output)"
+      },
+      {
+        "command": "claudeCodeManager.renameSession",
+        "title": "題名の変更",
+        "category": "Claude Code Manager",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeCodeManager.resetSessionTitle",
+        "title": "題名を自動生成に戻す",
+        "category": "Claude Code Manager",
+        "icon": "$(discard)"
       }
     ],
     "menus": {
@@ -157,6 +169,16 @@
           "group": "inline@2"
         },
         {
+          "command": "claudeCodeManager.renameSession",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "1_rename@1"
+        },
+        {
+          "command": "claudeCodeManager.resetSessionTitle",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "1_rename@2"
+        },
+        {
           "command": "claudeCodeManager.hideSession",
           "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
           "group": "8_archive"
@@ -191,6 +213,11 @@
           "default": 200,
           "description": "registry が保持する 1 セッションあたりの直近イベント数 (Webview で全件必要なら都度 jsonl から再ロード)"
         },
+        "claudeCodeManager.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "`claude` CLI バイナリの絶対パス。空の場合は PATH から `which claude` で自動検出。それもダメなら SDK 同梱のバイナリ (~208MB) を使う。"
+        },
         "claudeCodeManager.defaultPermissionMode": {
           "type": "string",
           "enum": ["default", "plan", "acceptEdits", "bypassPermissions"],
@@ -210,7 +237,7 @@
     "build": "node esbuild.config.js",
     "watch": "node esbuild.config.js --watch",
     "vscode:prepublish": "npm run build",
-    "package": "vsce package",
+    "package": "vsce package --no-dependencies --allow-missing-repository --baseContentUrl https://example.local --baseImagesUrl https://example.local",
     "compile-tests": "tsc -p .",
     "test": "vitest run"
   },

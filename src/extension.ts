@@ -9,6 +9,7 @@ import {
   extractUserSummary,
 } from "./sessions/parser";
 import { SessionRegistry } from "./sessions/registry";
+import { TitleStore } from "./sessions/titleStore";
 import { UsageStore } from "./sessions/usageStore";
 import { SessionWatcher } from "./sessions/watcher";
 import { scanCustomCommands } from "./utils/customCommands";
@@ -19,6 +20,7 @@ import { PanelSlashCommand, SessionPanelManager } from "./views/sessionPanel";
 import { StatusBar } from "./views/statusBar";
 
 import { statSync } from "fs";
+import { execSync } from "child_process";
 
 /** Shift+Tab で循環するモード (bypassPermissions は危険なので含めない)。 */
 const MODE_CYCLE: PermissionMode[] = ["default", "acceptEdits", "plan"];
@@ -43,6 +45,33 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     return "default";
   };
+
+  /**
+   * `claude` CLI のパスを解決:
+   *   1. `claudeCodeManager.claudePath` 設定が空でなければそれを使う
+   *   2. `which claude` (Windows は `where claude`) でPATHから検索
+   *   3. それもダメなら undefined → SDK 同梱のバイナリにフォールバック
+   *      (VSIX に同梱されてれば動く / なければエラー)
+   */
+  const resolveClaudePath = (): string | undefined => {
+    const override = vscode.workspace
+      .getConfiguration("claudeCodeManager")
+      .get<string>("claudePath", "")
+      .trim();
+    if (override) return override;
+    try {
+      const cmd = process.platform === "win32" ? "where claude" : "which claude";
+      const found = execSync(cmd, { encoding: "utf8" }).split(/\r?\n/)[0].trim();
+      if (found) return found;
+    } catch {
+      // not in PATH
+    }
+    return undefined;
+  };
+  const claudePath = resolveClaudePath();
+  output.appendLine(
+    `[ccmgr] claude CLI path: ${claudePath ?? "(not found in PATH — using SDK bundled binary)"}`,
+  );
   /** sessionId → 現在の権限モード (Shift+Tab 履歴と SDK の実態の source of truth) */
   const sessionModes = new Map<string, PermissionMode>();
 
@@ -61,6 +90,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const hiddenStore = new HiddenStore(context.globalState);
   const folders = new FolderStore(context.globalState);
   const usageStore = new UsageStore(context.globalState);
+  const titleStore = new TitleStore(context.globalState);
 
   // 順序的に usageStore 宣言後に listener を登録 (const の TDZ 回避)
   watcher.on("event", (evt) => {
@@ -74,6 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
     hiddenStore,
     folders,
     usageStore,
+    titleStore,
   );
   const treeView = vscode.window.createTreeView("ccmgr.sessions", {
     treeDataProvider: treeProvider,
@@ -155,6 +186,7 @@ export function activate(context: vscode.ExtensionContext): void {
       sessionModes.delete(sessionId);
       const { id: newId } = processManager.create(state.cwd, {
         permissionMode: startMode,
+        pathToClaudeCodeExecutable: claudePath,
       });
       registry.registerManaged({ sessionId: newId, cwd: state.cwd });
       sessionModes.set(newId, startMode);
@@ -167,7 +199,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // SDK の起動には数百 ms かかるため、Webview に進行状態を通知して
     // 「送信したのに無反応」と感じさせないようにする。
     panelManager.pushStatus(sessionId, "セッションを再開中…", "info");
-    processManager.resume(sessionId, state.cwd, { permissionMode: startMode });
+    processManager.resume(sessionId, state.cwd, {
+      permissionMode: startMode,
+      pathToClaudeCodeExecutable: claudePath,
+    });
     registry.markAsManaged(sessionId);
     registry.markSuspended(sessionId, false);
     sessionModes.set(sessionId, startMode);
@@ -180,7 +215,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const panelManager = new SessionPanelManager(context, registry, {
-    onSubmit: (sessionId, text) => {
+    onSubmit: (sessionId, text, attachments) => {
       const activeId = ensureManagedProcess(sessionId);
       if (!activeId) {
         vscode.window.showWarningMessage(
@@ -188,7 +223,7 @@ export function activate(context: vscode.ExtensionContext): void {
         );
         return;
       }
-      processManager.send(activeId, text);
+      processManager.send(activeId, text, attachments);
     },
     onResume: (sessionId) => {
       ensureManagedProcess(sessionId);
@@ -213,6 +248,32 @@ export function activate(context: vscode.ExtensionContext): void {
       // SDK init 待たずに custom (filesystem) commands は流せる
       pushCommandsToPanel(sessionId, false);
     },
+    onInterrupt: (sessionId) => {
+      void (async () => {
+        try {
+          await processManager.interrupt(sessionId);
+          panelManager.pushStatus(sessionId, "生成を中断しました", "info");
+        } catch (err) {
+          output.appendLine(
+            `[ccmgr] interrupt failed sid=${sessionId.slice(0, 8)}: ${(err as Error).message}`,
+          );
+        }
+      })();
+    },
+    onPermissionResponse: (sessionId, requestId, result) => {
+      const ok = processManager.resolvePermission(sessionId, requestId, result);
+      output.appendLine(
+        `[ccmgr] permission ${result.behavior} reqId=${requestId.slice(0, 8)} delivered=${ok}`,
+      );
+    },
+  });
+
+  // SDK の canUseTool callback で発生した承認依頼を webview へ転送
+  processManager.on("permissionRequest", (id, req) => {
+    output.appendLine(
+      `[ccmgr] permission request sid=${id.slice(0, 8)} tool=${req.toolName} reqId=${req.requestId.slice(0, 8)}`,
+    );
+    panelManager.pushPermissionRequest(id, req);
   });
 
   // ProcessManager のイベントを Tree / Panel / Persistence / UsageStore に橋渡し。
@@ -220,6 +281,7 @@ export function activate(context: vscode.ExtensionContext): void {
     registry.promotePending(pendingId, sessionId);
     panelManager.rekey(pendingId, sessionId);
     usageStore.rename(pendingId, sessionId);
+    void titleStore.rename(pendingId, sessionId);
     // sessionModes は pending- 側で保持していたので confirmed id に移す
     const pendingMode = sessionModes.get(pendingId);
     if (pendingMode) {
@@ -345,6 +407,8 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     treeView,
     treeProvider,
+    hiddenStore,
+    titleStore,
     rabbitRegistration,
     rabbitProvider,
     statusBar,
@@ -363,6 +427,37 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("claudeCodeManager.showLogs", () => {
       output.show(true);
     }),
+    vscode.commands.registerCommand(
+      "claudeCodeManager.renameSession",
+      async (target: unknown) => {
+        const sessionId = resolveSessionId(target);
+        if (!sessionId) return;
+        const state = registry.get(sessionId);
+        const currentCustom = titleStore.get(sessionId) ?? "";
+        // 既存タイトル (custom があればそれ、なければ最初の user メッセージから生成)
+        const initialValue =
+          currentCustom ||
+          (state?.firstUserPrompt
+            ? state.firstUserPrompt.replace(/\s+/g, " ").trim().slice(0, 80)
+            : "");
+        const next = await vscode.window.showInputBox({
+          title: "セッション題名の変更",
+          prompt: "新しい題名を入力 (空欄で自動生成に戻る)",
+          value: initialValue,
+          ignoreFocusOut: true,
+        });
+        if (next === undefined) return; // キャンセル
+        await titleStore.set(sessionId, next);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "claudeCodeManager.resetSessionTitle",
+      async (target: unknown) => {
+        const sessionId = resolveSessionId(target);
+        if (!sessionId) return;
+        await titleStore.remove(sessionId);
+      },
+    ),
     vscode.commands.registerCommand(
       "claudeCodeManager.copySessionId",
       async (target: unknown) => {
@@ -419,7 +514,10 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         const startMode = getDefaultPermissionMode();
-        const { id } = processManager.create(cwd, { permissionMode: startMode });
+        const { id } = processManager.create(cwd, {
+          permissionMode: startMode,
+          pathToClaudeCodeExecutable: claudePath,
+        });
         registry.registerManaged({ sessionId: id, cwd });
         sessionModes.set(id, startMode);
         panelManager.open(id);

@@ -114,6 +114,10 @@ body {
 .msg-tool {
   border-left: 3px solid var(--vscode-charts-orange, #ff9800);
   background: var(--vscode-editor-inactiveSelectionBackground, transparent);
+  padding: 4px 8px 6px;
+}
+.msg-tool.collapsed .tool-details {
+  display: none;
 }
 
 .msg-meta {
@@ -139,9 +143,60 @@ body {
   font-size: 0.95em;
 }
 
+/* 折り畳み式の tool 行 (横長 1 行) */
 .tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.92em;
+  text-align: left;
+  cursor: pointer;
+}
+.tool-head:hover {
+  background: var(--vscode-list-hoverBackground);
+  border-radius: 3px;
+}
+.tool-chevron {
+  font-size: 0.7em;
+  color: var(--vscode-descriptionForeground);
+  width: 1em;
+  transition: transform 0.15s;
+  flex: none;
+}
+.msg-tool:not(.collapsed) .tool-chevron {
+  transform: rotate(90deg);
+}
+.tool-name {
   font-weight: 600;
-  margin-bottom: 6px;
+  color: var(--vscode-charts-orange, #ff9800);
+  flex: none;
+}
+.tool-summary {
+  flex: 1;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.tool-status {
+  flex: none;
+  font-size: 0.95em;
+}
+.tool-status[data-status="pending"] { opacity: 0.6; }
+.tool-status[data-status="ok"]      { color: var(--vscode-charts-green, #28a745); }
+.tool-status[data-status="error"]   { color: var(--vscode-charts-red, #d73a49); }
+.tool-details {
+  margin-top: 4px;
 }
 
 .tool-input,
@@ -303,6 +358,373 @@ body {
 .ccmgr-input button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* 中断ボタン (生成中のみ表示) */
+.ccmgr-input button.btn-stop {
+  background: var(--vscode-errorForeground, #d4a017);
+  color: var(--vscode-editor-background, #fff);
+  font-weight: 600;
+  font-family: var(--vscode-editor-font-family);
+}
+.ccmgr-input button.btn-stop:hover {
+  filter: brightness(1.15);
+  background: var(--vscode-errorForeground, #d4a017);
+}
+.thinking-hint {
+  margin-left: 4px;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
+}
+
+/* ===== 検索バー (Cmd+F) ===== */
+.ccmgr-search {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+.ccmgr-search[hidden] { display: none; }
+.ccmgr-search input {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.92em;
+}
+.ccmgr-search .search-count {
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+  min-width: 60px;
+  text-align: right;
+}
+.ccmgr-search .search-btn {
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.ccmgr-search .search-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+mark.search-match {
+  background: var(--vscode-editor-findMatchHighlightBackground, #ffd700);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+mark.search-match.active {
+  background: var(--vscode-editor-findMatchBackground, #f50);
+  outline: 1px solid var(--vscode-editor-findMatchBorder, #f50);
+  color: inherit;
+}
+
+/* ===== 添付サムネイル ===== */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.attachments[hidden] { display: none; }
+.attachment {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.attachment img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attachment .att-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  font-size: 0.7em;
+  line-height: 1;
+  cursor: pointer;
+}
+.attachment .att-remove:hover { background: rgba(220, 50, 50, 0.9); }
+
+/* 送信した user メッセージブロックに表示される画像 echo */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.msg-attachments img {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-panel-border);
+}
+
+/* ===== ツール承認カード ===== */
+.msg-permission {
+  border-left: 4px solid var(--vscode-charts-yellow, #d4a017);
+  background: var(--vscode-editorWarning-background, var(--vscode-editorWidget-background));
+  padding: 10px 12px;
+}
+.msg-permission.permission-plan {
+  border-left-color: var(--vscode-charts-blue, #4c9aff);
+}
+.msg-permission.perm-resolved {
+  opacity: 0.6;
+}
+.msg-permission.perm-resolved[data-decision="allow"] {
+  border-left-color: var(--vscode-charts-green, #28a745);
+}
+.msg-permission.perm-resolved[data-decision="deny"] {
+  border-left-color: var(--vscode-charts-red, #d73a49);
+}
+
+.perm-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.perm-icon { font-size: 1.3em; }
+.perm-title { flex: 1; }
+.perm-tool {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.78em;
+  background: var(--vscode-textBlockQuote-background);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--vscode-charts-orange, #ff9800);
+}
+
+.perm-body {
+  margin: 6px 0 12px;
+  line-height: 1.55;
+}
+.perm-summary {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+  background: var(--vscode-textBlockQuote-background);
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+.perm-description {
+  font-size: 0.92em;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 4px;
+}
+.perm-reason {
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  margin-bottom: 4px;
+}
+.perm-details {
+  margin-top: 6px;
+  font-size: 0.85em;
+}
+.perm-details summary {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  user-select: none;
+}
+.perm-details pre {
+  margin-top: 4px;
+  background: var(--vscode-textBlockQuote-background);
+  padding: 8px;
+  border-radius: 4px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.perm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.perm-btn {
+  flex: 1;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+.perm-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.perm-allow {
+  background: var(--vscode-charts-green, #28a745);
+  color: white;
+}
+.perm-allow:hover:not(:disabled) { filter: brightness(1.15); }
+.perm-deny {
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-panel-border);
+}
+.perm-deny:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+/* ===== AskUserQuestion (複数選択肢) ===== */
+.msg-permission.permission-ask {
+  border-left-color: var(--vscode-charts-purple, #b392f0);
+  outline: none;
+}
+.perm-question {
+  margin: 6px 0 14px;
+  padding-bottom: 4px;
+}
+.perm-question + .perm-question {
+  margin-top: 14px;
+  border-top: 1px dashed var(--vscode-panel-border);
+  padding-top: 14px;
+}
+.perm-question-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.perm-chip {
+  display: inline-block;
+  font-size: 0.75em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--vscode-charts-purple, #b392f0);
+  color: var(--vscode-editor-background);
+}
+.perm-q-text {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.perm-multi-tag {
+  font-size: 0.72em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--vscode-descriptionForeground);
+  color: var(--vscode-descriptionForeground);
+}
+
+.perm-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.perm-option {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  background: var(--vscode-editor-background);
+  cursor: pointer;
+  outline: none;
+  transition: background 0.08s, border-color 0.08s;
+}
+.perm-option:hover:not([data-disabled]) {
+  background: var(--vscode-list-hoverBackground);
+}
+.perm-option:focus,
+.perm-option:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, var(--vscode-charts-purple, #b392f0));
+  outline-offset: -1px;
+}
+.perm-option.selected {
+  border-color: var(--vscode-charts-purple, #b392f0);
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+.perm-option input[type="radio"],
+.perm-option input[type="checkbox"] {
+  margin-top: 3px;
+  flex: none;
+  cursor: pointer;
+}
+.perm-option-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.perm-option-label {
+  font-weight: 600;
+  word-break: break-word;
+}
+.perm-option-desc {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  word-break: break-word;
+  line-height: 1.4;
+}
+.perm-option.selected .perm-option-desc {
+  color: inherit;
+  opacity: 0.85;
+}
+
+.perm-other-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.perm-other-input[hidden] { display: none; }
+
+/* 添付ボタン */
+.ccmgr-input button.btn-attach {
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+  padding: 4px 10px;
+}
+.ccmgr-input button.btn-attach:hover {
+  background: var(--vscode-list-hoverBackground);
 }
 
 /* ===== Mode badge (Shift+Tab で循環) ===== */

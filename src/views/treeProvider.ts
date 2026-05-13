@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { FolderEntry, FolderStore, labelOf } from "../folders/store";
 import { HiddenStore } from "../sessions/hiddenStore";
 import { SessionRegistry } from "../sessions/registry";
+import { TitleStore } from "../sessions/titleStore";
 import { SessionState, SessionStatus } from "../sessions/types";
 import { SessionUsage, UsageStore } from "../sessions/usageStore";
 import { formatTokens, truncate } from "../utils/text";
@@ -37,14 +38,15 @@ class SessionNode extends vscode.TreeItem {
   constructor(
     public readonly state: SessionState,
     usage: SessionUsage | undefined,
+    customTitle: string | undefined,
   ) {
-    super(buildLabel(state), vscode.TreeItemCollapsibleState.None);
+    super(buildLabel(state, customTitle), vscode.TreeItemCollapsibleState.None);
     this.id = `session:${state.sessionId}`;
     this.contextValue =
       state.origin === "managed" ? "session.managed" : "session.external";
     this.iconPath = iconForState(state);
     this.description = buildDescription(state, usage);
-    this.tooltip = buildTooltip(state, usage);
+    this.tooltip = buildTooltip(state, usage, customTitle);
     this.command = {
       command: "claudeCodeManager.openSession",
       title: "Open Session",
@@ -97,6 +99,7 @@ export class SessionsTreeProvider
     private hiddenStore: HiddenStore,
     private folders: FolderStore,
     private usageStore: UsageStore,
+    private titleStore: TitleStore,
   ) {
     registry.on("changed", () => this._onDidChangeTreeData.fire(undefined));
     registry.on("removed", () => this._onDidChangeTreeData.fire(undefined));
@@ -105,6 +108,9 @@ export class SessionsTreeProvider
       this._onDidChangeTreeData.fire(undefined),
     );
     folders.on("changed", () => this._onDidChangeTreeData.fire(undefined));
+    titleStore.on("changed", () =>
+      this._onDidChangeTreeData.fire(undefined),
+    );
     // 複数 managed セッション同時 result 連発時の再描画を 200ms 圧縮
     usageStore.on("changed", () => this.scheduleDebouncedRefresh());
     this.timer = setInterval(
@@ -169,7 +175,12 @@ export class SessionsTreeProvider
     }
     if (element.kind === "folder") {
       const sessionItems = element.sessions.map(
-        (s) => new SessionNode(s, this.usageStore.get(s.sessionId)),
+        (s) =>
+          new SessionNode(
+            s,
+            this.usageStore.get(s.sessionId),
+            this.titleStore.get(s.sessionId),
+          ),
       );
       return [new ActionNode("newSession", element.entry.cwd), ...sessionItems];
     }
@@ -177,9 +188,23 @@ export class SessionsTreeProvider
   }
 }
 
-const buildLabel = (s: SessionState): string => {
+const buildLabel = (s: SessionState, customTitle?: string): string => {
   const branch = s.gitBranch ? ` (${s.gitBranch})` : "";
-  return `${statusGlyph(s)} ${s.sessionId.slice(0, 8)}${branch}`;
+  // 優先順位: ① 手動で付けたカスタム題名 ② 最初の user メッセージ (auto) ③ sessionId 先頭8文字
+  const title =
+    customTitle ||
+    autoTitleFromFirstPrompt(s.firstUserPrompt) ||
+    s.sessionId.slice(0, 8);
+  return `${statusGlyph(s)} ${title}${branch}`;
+};
+
+const autoTitleFromFirstPrompt = (raw?: string): string => {
+  if (!raw) return "";
+  // 改行・連続空白を 1 スペースに潰し、先頭 40 文字程度に切る (title 用)
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  if (!oneLine) return "";
+  if (oneLine.length <= 40) return oneLine;
+  return oneLine.slice(0, 39) + "…";
 };
 
 const buildDescription = (
@@ -200,10 +225,12 @@ const buildDescription = (
 const buildTooltip = (
   s: SessionState,
   usage: SessionUsage | undefined,
+  customTitle?: string,
 ): vscode.MarkdownString => {
   const md = new vscode.MarkdownString();
   md.isTrusted = false;
   md.supportThemeIcons = true;
+  if (customTitle) md.appendMarkdown(`**Title**: ${customTitle}\n\n`);
   md.appendMarkdown(`**Origin**: ${s.origin}\n\n`);
   md.appendMarkdown(`**Status**: ${s.status}\n\n`);
   md.appendMarkdown(`**Project**: \`${s.cwd}\`\n\n`);

@@ -21,8 +21,18 @@ const inputBar = document.getElementById("input-bar") as HTMLElement;
 const inputText = document.getElementById("input-text") as HTMLTextAreaElement;
 const inputHint = document.getElementById("input-hint") as HTMLElement;
 const btnSubmit = document.getElementById("btn-submit") as HTMLButtonElement;
+const btnStop = document.getElementById("btn-stop") as HTMLButtonElement;
+const btnAttach = document.getElementById("btn-attach") as HTMLButtonElement;
+const fileInput = document.getElementById("file-input") as HTMLInputElement;
+const attachmentsEl = document.getElementById("attachments") as HTMLElement;
 const modeBadge = document.getElementById("mode-badge") as HTMLElement;
 const slashDropdown = document.getElementById("slash-dropdown") as HTMLElement;
+const searchBar = document.getElementById("search-bar") as HTMLElement;
+const searchInput = document.getElementById("search-input") as HTMLInputElement;
+const searchCount = document.getElementById("search-count") as HTMLElement;
+const searchPrev = document.getElementById("search-prev") as HTMLButtonElement;
+const searchNext = document.getElementById("search-next") as HTMLButtonElement;
+const searchClose = document.getElementById("search-close") as HTMLButtonElement;
 
 type PermissionMode =
   | "default"
@@ -76,6 +86,20 @@ const FALLBACK_COMMANDS: SlashCommandLite[] = [
   { name: "exit", description: "セッションを終了", argumentHint: "" },
 ];
 
+// ===== 添付画像 (post 時に submit に含める) =====
+interface PendingAttachment {
+  id: string;
+  name: string;
+  mediaType: string;
+  base64: string;
+  dataUrl: string; // プレビュー表示用
+}
+const pendingAttachments: PendingAttachment[] = [];
+
+// ===== Cmd+F 検索 =====
+let searchMatches: HTMLElement[] = [];
+let searchActiveIndex = -1;
+
 let slashCommands: SlashCommandLite[] = FALLBACK_COMMANDS.slice();
 let slashState: { active: boolean; query: string; selected: number } = {
   active: false,
@@ -113,10 +137,30 @@ window.addEventListener("message", (event) => {
       slashCommands = incoming;
     }
     if (slashState.active) renderSlashDropdown();
+  } else if (msg.type === "permission") {
+    renderPermissionRequest(msg.request);
   }
 });
 
 btnSubmit.addEventListener("click", submitInput);
+btnStop.addEventListener("click", interruptGeneration);
+
+function interruptGeneration() {
+  vscode.postMessage({ command: "interrupt" });
+}
+
+function isGenerating(): boolean {
+  return !btnStop.hidden;
+}
+
+// 生成中に Esc キーで中断 (slash dropdown が開いてる時はそちらが優先)
+window.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  if (slashState.active) return; // dropdown 閉じる方を優先 (inputText の handler 側で処理)
+  if (!isGenerating()) return;
+  ev.preventDefault();
+  interruptGeneration();
+});
 inputText.addEventListener("keydown", (ev) => {
   // 1. Slash dropdown が開いてる時は dropdown のキー操作を最優先
   if (slashState.active) {
@@ -287,8 +331,13 @@ function escapeHtml(s: string): string {
 
 function submitInput() {
   const text = inputText.value.trim();
-  if (!text) return;
-  vscode.postMessage({ command: "submit", text });
+  if (!text && pendingAttachments.length === 0) return;
+  const attachments = pendingAttachments.map((a) => ({
+    name: a.name,
+    mediaType: a.mediaType,
+    base64: a.base64,
+  }));
+  vscode.postMessage({ command: "submit", text, attachments });
   // ローカルにも user メッセージとして即時表示 (echo)
   const block = document.createElement("section");
   block.className = "msg msg-user";
@@ -299,8 +348,228 @@ function submitInput() {
   block.appendChild(body);
   log.appendChild(block);
   inputText.value = "";
+  if (pendingAttachments.length > 0) {
+    // 添付画像のサムネイルを user メッセージブロックに見せる (echo)
+    const preview = document.createElement("div");
+    preview.className = "msg-attachments";
+    for (const a of pendingAttachments) {
+      const img = document.createElement("img");
+      img.src = a.dataUrl;
+      img.title = a.name;
+      preview.appendChild(img);
+    }
+    block.appendChild(preview);
+    pendingAttachments.length = 0;
+    renderAttachmentStrip();
+  }
   showThinking();
   scrollToBottomIfNeeded();
+}
+
+// ===== 添付ハンドリング =====
+btnAttach.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  const files = fileInput.files;
+  if (!files) return;
+  for (const f of Array.from(files)) {
+    await addAttachment(f);
+  }
+  fileInput.value = ""; // 同一ファイル再選択を許可
+  renderAttachmentStrip();
+});
+
+// ペースト & ドラッグ&ドロップ
+inputText.addEventListener("paste", async (ev) => {
+  if (!ev.clipboardData) return;
+  const items = Array.from(ev.clipboardData.items).filter((it) =>
+    it.type.startsWith("image/"),
+  );
+  if (items.length === 0) return;
+  ev.preventDefault();
+  for (const it of items) {
+    const file = it.getAsFile();
+    if (file) await addAttachment(file);
+  }
+  renderAttachmentStrip();
+});
+inputText.addEventListener("dragover", (ev) => ev.preventDefault());
+inputText.addEventListener("drop", async (ev) => {
+  if (!ev.dataTransfer) return;
+  const files = Array.from(ev.dataTransfer.files).filter((f) =>
+    f.type.startsWith("image/"),
+  );
+  if (files.length === 0) return;
+  ev.preventDefault();
+  for (const f of files) await addAttachment(f);
+  renderAttachmentStrip();
+});
+
+async function addAttachment(file: File): Promise<void> {
+  if (!file.type.startsWith("image/")) return;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+  const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+  if (!m) return;
+  pendingAttachments.push({
+    id: Math.random().toString(36).slice(2),
+    name: file.name || "image",
+    mediaType: m[1],
+    base64: m[2],
+    dataUrl,
+  });
+}
+
+function renderAttachmentStrip(): void {
+  if (pendingAttachments.length === 0) {
+    attachmentsEl.hidden = true;
+    attachmentsEl.innerHTML = "";
+    return;
+  }
+  attachmentsEl.hidden = false;
+  attachmentsEl.innerHTML = "";
+  for (const a of pendingAttachments) {
+    const item = document.createElement("div");
+    item.className = "attachment";
+    item.innerHTML = `<img src="${a.dataUrl}" alt="${escapeHtml(a.name)}" /><button class="att-remove" title="削除">✕</button>`;
+    const removeBtn = item.querySelector(".att-remove") as HTMLButtonElement;
+    removeBtn.addEventListener("click", () => {
+      const idx = pendingAttachments.findIndex((p) => p.id === a.id);
+      if (idx >= 0) pendingAttachments.splice(idx, 1);
+      renderAttachmentStrip();
+    });
+    attachmentsEl.appendChild(item);
+  }
+}
+
+// ===== Cmd/Ctrl+F 検索 =====
+window.addEventListener("keydown", (ev) => {
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "f") {
+    ev.preventDefault();
+    openSearch();
+    return;
+  }
+  if (ev.key === "Escape" && !searchBar.hidden) {
+    ev.preventDefault();
+    closeSearch();
+  }
+});
+
+function openSearch(): void {
+  searchBar.hidden = false;
+  searchInput.focus();
+  searchInput.select();
+}
+function closeSearch(): void {
+  searchBar.hidden = true;
+  searchInput.value = "";
+  clearSearchHighlights();
+}
+searchClose.addEventListener("click", closeSearch);
+searchInput.addEventListener("input", () => {
+  applySearch(searchInput.value);
+});
+searchInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    if (ev.shiftKey) navigateSearch(-1);
+    else navigateSearch(1);
+  } else if (ev.key === "Escape") {
+    ev.preventDefault();
+    closeSearch();
+  }
+});
+searchPrev.addEventListener("click", () => navigateSearch(-1));
+searchNext.addEventListener("click", () => navigateSearch(1));
+
+function applySearch(q: string): void {
+  clearSearchHighlights();
+  if (!q) {
+    updateSearchCount();
+    return;
+  }
+  const lower = q.toLowerCase();
+  const root = log;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const t = node as Text;
+    if (!t.nodeValue) continue;
+    const el = t.parentElement;
+    if (!el) continue;
+    if (el.closest("mark.search-match")) continue;
+    if (el.closest("script, style")) continue;
+    textNodes.push(t);
+  }
+  for (const tn of textNodes) {
+    const text = tn.nodeValue ?? "";
+    const lc = text.toLowerCase();
+    if (!lc.includes(lower)) continue;
+    const parent = tn.parentNode;
+    if (!parent) continue;
+    const frag = document.createDocumentFragment();
+    let cursor = 0;
+    let idx = lc.indexOf(lower, 0);
+    while (idx >= 0) {
+      if (idx > cursor) {
+        frag.appendChild(document.createTextNode(text.slice(cursor, idx)));
+      }
+      const mark = document.createElement("mark");
+      mark.className = "search-match";
+      mark.textContent = text.slice(idx, idx + q.length);
+      frag.appendChild(mark);
+      searchMatches.push(mark);
+      cursor = idx + q.length;
+      idx = lc.indexOf(lower, cursor);
+    }
+    if (cursor < text.length) {
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+    }
+    parent.replaceChild(frag, tn);
+  }
+  if (searchMatches.length > 0) setActiveMatch(0, true);
+  updateSearchCount();
+}
+
+function clearSearchHighlights(): void {
+  for (const m of Array.from(document.querySelectorAll("mark.search-match"))) {
+    const parent = m.parentNode;
+    if (!parent) continue;
+    while (m.firstChild) parent.insertBefore(m.firstChild, m);
+    parent.removeChild(m);
+    if ("normalize" in parent) (parent as Element).normalize();
+  }
+  searchMatches = [];
+  searchActiveIndex = -1;
+}
+
+function navigateSearch(delta: number): void {
+  if (searchMatches.length === 0) return;
+  const next =
+    (searchActiveIndex + delta + searchMatches.length) % searchMatches.length;
+  setActiveMatch(next, true);
+}
+
+function setActiveMatch(i: number, scroll: boolean): void {
+  for (const m of searchMatches) m.classList.remove("active");
+  searchActiveIndex = i;
+  const active = searchMatches[i];
+  if (!active) return;
+  active.classList.add("active");
+  if (scroll) active.scrollIntoView({ block: "center", behavior: "smooth" });
+  updateSearchCount();
+}
+
+function updateSearchCount(): void {
+  if (searchMatches.length === 0) {
+    searchCount.textContent = "0 / 0";
+  } else {
+    searchCount.textContent = `${searchActiveIndex + 1} / ${searchMatches.length}`;
+  }
 }
 
 let pendingAssistantBlock: HTMLElement | null = null;
@@ -312,13 +581,16 @@ const activeBlockTypes = new Map<number, string>();
 const activeBlockTexts = new Map<number, string>();
 
 function showThinking() {
+  // Send → Stop の入れ替え (重複呼び出し時もボタン状態は常に正しくする)
+  btnSubmit.hidden = true;
+  btnStop.hidden = false;
   if (pendingAssistantBlock) return;
   const block = document.createElement("section");
   block.className = "msg msg-assistant pending";
   block.appendChild(timestampEl(Date.now(), "Assistant"));
   const body = document.createElement("div");
   body.className = "msg-body thinking";
-  body.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> 考えています…';
+  body.innerHTML = '<span class="dots"><span></span><span></span><span></span></span> 考えています… <span class="thinking-hint">(Esc / Stop で中断)</span>';
   block.appendChild(body);
   log.appendChild(block);
   pendingAssistantBlock = block;
@@ -347,6 +619,9 @@ function appendTextDelta(index: number, text: string) {
 }
 
 function hideThinking() {
+  // Stop → Send に戻す
+  btnSubmit.hidden = false;
+  btnStop.hidden = true;
   if (!pendingAssistantBlock) return;
   pendingAssistantBlock.remove();
   pendingAssistantBlock = null;
@@ -548,25 +823,567 @@ function renderAssistantMessage(evt: IncomingEvent) {
 }
 
 function renderToolUseCard(part: any): HTMLElement {
+  const name: string = part.name ?? "tool";
   const card = document.createElement("section");
-  card.className = "msg msg-tool";
-  const head = document.createElement("div");
+  card.className = "msg msg-tool collapsed";
+
+  // クリックで折り畳み開閉する header 行
+  const head = document.createElement("button");
+  head.type = "button";
   head.className = "tool-head";
-  head.textContent = `[tool] ${part.name ?? "tool"}`;
+  head.innerHTML = `
+    <span class="tool-chevron">▶</span>
+    <span class="tool-name">${escapeHtml(name)}</span>
+    <span class="tool-summary">${escapeHtml(summarizeToolInput(name, part.input))}</span>
+    <span class="tool-status" data-status="pending">⏳</span>
+  `;
+  head.addEventListener("click", () => {
+    card.classList.toggle("collapsed");
+  });
   card.appendChild(head);
+
+  // 詳細 (collapsed 中は CSS で非表示)
+  const details = document.createElement("div");
+  details.className = "tool-details";
 
   const inputBlock = document.createElement("pre");
   inputBlock.className = "tool-input";
   inputBlock.textContent = formatInput(part.input);
-  card.appendChild(inputBlock);
+  details.appendChild(inputBlock);
 
   const out = document.createElement("pre");
   out.className = "tool-output pending";
   out.textContent = "(running…)";
   out.dataset.toolUseId = part.id;
-  card.appendChild(out);
+  details.appendChild(out);
 
+  card.appendChild(details);
   return card;
+}
+
+/**
+ * tool input を 1 行サマリに圧縮。tool 名ごとに「人間が見て一番分かりやすい
+ * 1 フィールド」を選んで表示する。
+ */
+function summarizeToolInput(name: string, input: unknown): string {
+  if (input == null || typeof input !== "object") return "";
+  const obj = input as Record<string, unknown>;
+  const pick = (k: string): string =>
+    typeof obj[k] === "string" ? (obj[k] as string) : "";
+  switch (name) {
+    case "Bash": {
+      const desc = pick("description");
+      if (desc) return desc;
+      const cmd = pick("command");
+      return cmd ? truncateOneLine(cmd, 120) : "";
+    }
+    case "Edit":
+    case "MultiEdit":
+    case "Write":
+    case "NotebookEdit":
+      return pick("file_path") || pick("notebook_path");
+    case "Read": {
+      const fp = pick("file_path") || pick("notebook_path");
+      const off = obj["offset"];
+      const lim = obj["limit"];
+      const suffix = off || lim ? ` (${off ? `+${off}` : ""}${lim ? `/${lim}` : ""})` : "";
+      return fp + suffix;
+    }
+    case "Grep": {
+      const p = pick("pattern");
+      const where = pick("path") || pick("glob");
+      return p ? `"${truncateOneLine(p, 60)}"${where ? ` in ${where}` : ""}` : "";
+    }
+    case "Glob":
+      return pick("pattern");
+    case "WebFetch":
+    case "WebSearch":
+      return pick("url") || pick("query");
+    case "Task":
+      return pick("description") || truncateOneLine(pick("prompt"), 100);
+    case "TodoWrite":
+      return "update todos";
+    default: {
+      // 既知でない tool: 最初の string フィールドを表示
+      for (const v of Object.values(obj)) {
+        if (typeof v === "string" && v) return truncateOneLine(v, 100);
+      }
+      return "";
+    }
+  }
+}
+
+function truncateOneLine(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  return oneLine.slice(0, max - 1) + "…";
+}
+
+// ===== ツール承認カード (canUseTool 経由の permission request) =====
+
+interface PermissionRequest {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  toolUseID: string;
+  title?: string;
+  description?: string;
+  displayName?: string;
+  decisionReason?: string;
+  blockedPath?: string;
+}
+
+function renderPermissionRequest(req: PermissionRequest): void {
+  // AskUserQuestion は専用 UI (選択肢を矢印キー or クリックで選んで Enter 送信)。
+  // SDK が CLI で出している「複数選択質問」UX を webview で再現する。
+  if (req.toolName === "AskUserQuestion") {
+    if (renderAskUserQuestion(req)) return;
+    // input が不正な形ならフォールバック (下の generic UI に流す)
+  }
+
+  const isPlan = req.toolName === "ExitPlanMode";
+  const card = document.createElement("section");
+  card.className = isPlan
+    ? "msg msg-permission permission-plan"
+    : "msg msg-permission";
+  card.dataset.requestId = req.requestId;
+
+  // ヘッダ: アイコン + タイトル + tool 名
+  const header = document.createElement("div");
+  header.className = "perm-header";
+  const icon = isPlan ? "📋" : "🔐";
+  const title =
+    req.title || (isPlan ? "プランを確認してください" : "ツール実行の承認");
+  header.innerHTML = `<span class="perm-icon">${icon}</span><span class="perm-title">${escapeHtml(title)}</span><span class="perm-tool">${escapeHtml(req.toolName)}</span>`;
+  card.appendChild(header);
+
+  // 詳細: plan なら plan 内容を markdown 表示。それ以外は input サマリ + 詳細
+  const body = document.createElement("div");
+  body.className = "perm-body";
+
+  if (isPlan && typeof req.input.plan === "string") {
+    body.innerHTML = renderMarkdown(req.input.plan as string);
+  } else {
+    const summary = summarizeToolInput(req.toolName, req.input);
+    if (summary) {
+      const s = document.createElement("div");
+      s.className = "perm-summary";
+      s.textContent = summary;
+      body.appendChild(s);
+    }
+    if (req.description) {
+      const d = document.createElement("div");
+      d.className = "perm-description";
+      d.textContent = req.description;
+      body.appendChild(d);
+    }
+    if (req.decisionReason) {
+      const r = document.createElement("div");
+      r.className = "perm-reason";
+      r.textContent = req.decisionReason;
+      body.appendChild(r);
+    }
+    // 全 input を折り畳みで見られるように
+    const det = document.createElement("details");
+    det.className = "perm-details";
+    const sum = document.createElement("summary");
+    sum.textContent = "詳細を表示";
+    det.appendChild(sum);
+    const pre = document.createElement("pre");
+    pre.textContent = formatInput(req.input);
+    det.appendChild(pre);
+    body.appendChild(det);
+  }
+  card.appendChild(body);
+
+  // ボタン: Allow / Deny
+  const actions = document.createElement("div");
+  actions.className = "perm-actions";
+  const allowBtn = document.createElement("button");
+  allowBtn.className = "perm-btn perm-allow";
+  allowBtn.textContent = isPlan ? "✓ プランを承認して実行" : "✓ 許可";
+  const denyBtn = document.createElement("button");
+  denyBtn.className = "perm-btn perm-deny";
+  denyBtn.textContent = isPlan ? "✗ プランを却下" : "✗ 拒否";
+
+  const lock = () => {
+    allowBtn.disabled = true;
+    denyBtn.disabled = true;
+    card.classList.add("perm-resolved");
+  };
+  allowBtn.addEventListener("click", () => {
+    lock();
+    card.dataset.decision = "allow";
+    vscode.postMessage({
+      command: "permissionResponse",
+      requestId: req.requestId,
+      decision: "allow",
+    });
+  });
+  denyBtn.addEventListener("click", () => {
+    lock();
+    card.dataset.decision = "deny";
+    vscode.postMessage({
+      command: "permissionResponse",
+      requestId: req.requestId,
+      decision: "deny",
+      message: "ユーザーが拒否しました",
+    });
+  });
+  actions.appendChild(allowBtn);
+  actions.appendChild(denyBtn);
+  card.appendChild(actions);
+
+  log.appendChild(card);
+  scrollToBottomIfNeeded();
+}
+
+// ===== AskUserQuestion: 複数選択肢付きの質問 UI =====
+
+interface AskQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description?: string; preview?: string }>;
+  multiSelect: boolean;
+}
+
+interface AskUserQuestionInput {
+  questions: AskQuestion[];
+}
+
+/**
+ * SDK 組み込みツール `AskUserQuestion` 用の専用 UI。
+ *
+ * - 各質問について `options[]` を radio (single) or checkbox (multi) で並べる
+ * - 末尾に "Other (自由記述)" を自動追加 (SDK 仕様)
+ * - ↑↓ でオプション間移動、Tab で次質問、Enter で送信、Esc でキャンセル
+ * - 送信時は `{ behavior: "allow", updatedInput: { ...input, answers, annotations } }`
+ *   を返すことで SDK にユーザー回答を伝える。
+ *
+ * @returns 描画に成功した場合 true (false なら generic UI でフォールバック描画)。
+ */
+function renderAskUserQuestion(req: PermissionRequest): boolean {
+  const input = req.input as unknown as AskUserQuestionInput;
+  if (
+    !input ||
+    !Array.isArray(input.questions) ||
+    input.questions.length === 0
+  ) {
+    return false;
+  }
+  // 各質問のフォーマット最低限を検証
+  for (const q of input.questions) {
+    if (
+      !q ||
+      typeof q.question !== "string" ||
+      !Array.isArray(q.options) ||
+      q.options.length === 0
+    ) {
+      return false;
+    }
+  }
+
+  const card = document.createElement("section");
+  card.className = "msg msg-permission permission-ask";
+  card.dataset.requestId = req.requestId;
+  card.tabIndex = -1;
+
+  // ヘッダ
+  const header = document.createElement("div");
+  header.className = "perm-header";
+  header.innerHTML = `<span class="perm-icon">❓</span><span class="perm-title">${escapeHtml(req.title || "回答を選んでください")}</span><span class="perm-tool">AskUserQuestion</span>`;
+  card.appendChild(header);
+
+  // 各質問の現在の選択 state
+  // single の場合: answers[question] = chosenLabel | "__other__:<idx>"
+  // multi の場合 : answers[question] = "label1,label2,..." or "__other__:<idx>,label1,..."
+  const answers: Record<string, string> = {};
+  const otherTexts: Record<string, string> = {};
+
+  // Continue ボタンの先行宣言 (各 setSelected から参照するため)
+  const continueBtn = document.createElement("button");
+
+  const updateContinueState = () => {
+    const allAnswered = input.questions.every((q) => {
+      const a = answers[q.question];
+      if (!a) return false;
+      // multi では複数の値を含むので "__other__" を部分含む場合も判定
+      const includesOther = a.split(",").some((v) => v.startsWith("__other__"));
+      if (includesOther) {
+        const txt = otherTexts[q.question];
+        if (!txt || !txt.trim()) return false;
+      }
+      return true;
+    });
+    continueBtn.disabled = !allAnswered;
+  };
+
+  for (const q of input.questions) {
+    const qEl = document.createElement("div");
+    qEl.className = "perm-question";
+    qEl.dataset.question = q.question;
+
+    const qHead = document.createElement("div");
+    qHead.className = "perm-question-header";
+    qHead.innerHTML = `<span class="perm-chip">${escapeHtml(q.header || "")}</span><span class="perm-q-text">${escapeHtml(q.question)}</span>`;
+    if (q.multiSelect) {
+      const tag = document.createElement("span");
+      tag.className = "perm-multi-tag";
+      tag.textContent = "複数選択可";
+      qHead.appendChild(tag);
+    }
+    qEl.appendChild(qHead);
+
+    const optsWrap = document.createElement("div");
+    optsWrap.className = "perm-options";
+    optsWrap.setAttribute("role", q.multiSelect ? "group" : "radiogroup");
+
+    const inputType = q.multiSelect ? "checkbox" : "radio";
+
+    // 通常オプション + 末尾に "Other (自由記述)" を自動追加
+    const opts: Array<{
+      label: string;
+      description?: string;
+      preview?: string;
+      isOther: boolean;
+    }> = [
+      ...q.options.map((o) => ({
+        label: o.label,
+        description: o.description,
+        preview: o.preview,
+        isOther: false,
+      })),
+      {
+        label: "Other (自由記述)",
+        description: "上記以外を自分で書く",
+        isOther: true,
+      },
+    ];
+
+    opts.forEach((o, idx) => {
+      const optEl = document.createElement("label");
+      optEl.className = "perm-option";
+      optEl.tabIndex = 0;
+      optEl.dataset.optionIndex = String(idx);
+
+      const inp = document.createElement("input");
+      inp.type = inputType;
+      inp.name = `q-${req.requestId}-${input.questions.indexOf(q)}`;
+      inp.value = o.isOther ? `__other__:${idx}` : o.label;
+      optEl.appendChild(inp);
+
+      const main = document.createElement("div");
+      main.className = "perm-option-main";
+
+      const labelText = document.createElement("div");
+      labelText.className = "perm-option-label";
+      labelText.textContent = o.label;
+      main.appendChild(labelText);
+
+      if (o.description) {
+        const desc = document.createElement("div");
+        desc.className = "perm-option-desc";
+        desc.textContent = o.description;
+        main.appendChild(desc);
+      }
+      optEl.appendChild(main);
+
+      let otherInput: HTMLTextAreaElement | undefined;
+      if (o.isOther) {
+        otherInput = document.createElement("textarea");
+        otherInput.className = "perm-other-input";
+        otherInput.placeholder = "自由記述…";
+        otherInput.hidden = true;
+        otherInput.rows = 2;
+        otherInput.addEventListener("input", () => {
+          otherTexts[q.question] = otherInput!.value;
+          updateContinueState();
+        });
+        optEl.appendChild(otherInput);
+      }
+
+      const setSelected = () => {
+        if (!q.multiSelect) {
+          // 兄弟をクリア
+          for (const sib of optsWrap.querySelectorAll(".perm-option")) {
+            sib.classList.remove("selected");
+            const t = sib.querySelector(
+              ".perm-other-input",
+            ) as HTMLTextAreaElement | null;
+            if (t && t !== otherInput) t.hidden = true;
+          }
+          optEl.classList.add("selected");
+          answers[q.question] = inp.value;
+          if (otherInput) {
+            otherInput.hidden = false;
+            otherInput.focus();
+          }
+        } else {
+          optEl.classList.toggle("selected", inp.checked);
+          const selected = Array.from(
+            optsWrap.querySelectorAll<HTMLInputElement>("input:checked"),
+          )
+            .map((i) => i.value)
+            .join(",");
+          answers[q.question] = selected;
+          if (otherInput) otherInput.hidden = !inp.checked;
+        }
+        updateContinueState();
+      };
+
+      inp.addEventListener("change", setSelected);
+      // label/desc 領域クリックでも選択するように (input 直接クリックとの二重発火を避ける)
+      optEl.addEventListener("click", (ev) => {
+        if (ev.target === inp) return;
+        // textarea 内クリックは選択トグルしない
+        if ((ev.target as HTMLElement).closest(".perm-other-input")) return;
+        if (!q.multiSelect) inp.checked = true;
+        else inp.checked = !inp.checked;
+        setSelected();
+      });
+
+      optsWrap.appendChild(optEl);
+    });
+
+    qEl.appendChild(optsWrap);
+    card.appendChild(qEl);
+  }
+
+  // Action: Continue / Cancel
+  const actions = document.createElement("div");
+  actions.className = "perm-actions";
+  continueBtn.className = "perm-btn perm-allow";
+  continueBtn.textContent = "✓ 回答を送信 (Enter)";
+  continueBtn.disabled = true;
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "perm-btn perm-deny";
+  cancelBtn.textContent = "✗ キャンセル (Esc)";
+
+  const lock = () => {
+    continueBtn.disabled = true;
+    cancelBtn.disabled = true;
+    card.classList.add("perm-resolved");
+    for (const i of card.querySelectorAll<HTMLInputElement>(
+      "input, textarea",
+    )) {
+      i.disabled = true;
+    }
+  };
+
+  continueBtn.addEventListener("click", () => {
+    if (continueBtn.disabled) return;
+    // "__other__:idx" を実際の自由記述テキストに展開
+    const finalAnswers: Record<string, string> = {};
+    const annotations: Record<string, { notes?: string }> = {};
+    for (const q of input.questions) {
+      const a = answers[q.question] || "";
+      const parts = a.split(",").filter((v) => v.length > 0);
+      const expanded = parts.map((p) => {
+        if (p.startsWith("__other__")) {
+          const txt = otherTexts[q.question]?.trim() || "(empty)";
+          annotations[q.question] = { notes: otherTexts[q.question] };
+          return txt;
+        }
+        return p;
+      });
+      finalAnswers[q.question] = expanded.join(", ");
+    }
+    lock();
+    card.dataset.decision = "allow";
+    vscode.postMessage({
+      command: "permissionResponse",
+      requestId: req.requestId,
+      decision: "allow",
+      updatedInput: {
+        ...input,
+        answers: finalAnswers,
+        annotations,
+      },
+    });
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    lock();
+    card.dataset.decision = "deny";
+    vscode.postMessage({
+      command: "permissionResponse",
+      requestId: req.requestId,
+      decision: "deny",
+      message: "ユーザーが質問への回答をキャンセルしました",
+    });
+  });
+
+  actions.appendChild(continueBtn);
+  actions.appendChild(cancelBtn);
+  card.appendChild(actions);
+
+  log.appendChild(card);
+  scrollToBottomIfNeeded();
+
+  installAskKeyboardNav(card, continueBtn, cancelBtn);
+
+  // 最初のオプションにフォーカス (矢印キーで即操作可能に)
+  const firstOpt = card.querySelector<HTMLElement>(".perm-option");
+  firstOpt?.focus();
+
+  return true;
+}
+
+/**
+ * AskUserQuestion カード内のキーボード操作。
+ * - ↑↓: 同一質問内オプションの focus 移動 (radio なら focus=select)
+ * - Enter: Continue (回答を送信)
+ * - Esc: Cancel
+ * - Tab/Shift+Tab はブラウザの自然な挙動に任せる (質問間移動)
+ */
+function installAskKeyboardNav(
+  card: HTMLElement,
+  continueBtn: HTMLButtonElement,
+  cancelBtn: HTMLButtonElement,
+): void {
+  card.addEventListener("keydown", (ev) => {
+    if (card.classList.contains("perm-resolved")) return;
+
+    // textarea 内では矢印 / Enter は通常の編集として扱う
+    const target = ev.target as HTMLElement;
+    const inTextarea = target.tagName === "TEXTAREA";
+    if (inTextarea && ev.key !== "Escape") return;
+
+    if (ev.key === "Enter" && !continueBtn.disabled) {
+      ev.preventDefault();
+      continueBtn.click();
+      return;
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      cancelBtn.click();
+      return;
+    }
+    if (ev.key !== "ArrowUp" && ev.key !== "ArrowDown") return;
+
+    const optEl = target.closest(".perm-option") as HTMLElement | null;
+    if (!optEl) return;
+    const group = optEl.parentElement;
+    if (!group) return;
+    const sibs = Array.from(
+      group.querySelectorAll<HTMLElement>(".perm-option"),
+    );
+    const idx = sibs.indexOf(optEl);
+    if (idx < 0) return;
+    const next =
+      ev.key === "ArrowDown"
+        ? sibs[Math.min(idx + 1, sibs.length - 1)]
+        : sibs[Math.max(idx - 1, 0)];
+    if (!next || next === optEl) return;
+    ev.preventDefault();
+    next.focus();
+    // ラジオなら focus = select (CLI 同等の挙動)
+    const inp = next.querySelector<HTMLInputElement>('input[type="radio"]');
+    if (inp) {
+      inp.checked = true;
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
 }
 
 function handleToolResults(evt: IncomingEvent) {
@@ -588,6 +1405,17 @@ function handleToolResults(evt: IncomingEvent) {
     out.textContent = output || "(no output)";
     out.classList.remove("pending");
     out.classList.toggle("error", !!part.is_error);
+    // header の status アイコンも更新 (⏳ → ✓ / ✗)
+    const status = card.querySelector(".tool-status") as HTMLElement | null;
+    if (status) {
+      if (part.is_error) {
+        status.dataset.status = "error";
+        status.textContent = "✗";
+      } else {
+        status.dataset.status = "ok";
+        status.textContent = "✓";
+      }
+    }
   }
 }
 

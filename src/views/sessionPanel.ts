@@ -1,6 +1,13 @@
 import * as fs from "fs";
 import * as vscode from "vscode";
-import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  PermissionMode,
+  PermissionResult,
+} from "@anthropic-ai/claude-agent-sdk";
+import type {
+  Attachment,
+  PermissionRequestPayload,
+} from "../runtime/claudeProcess";
 import { SessionRegistry } from "../sessions/registry";
 import { SessionEvent, SessionState } from "../sessions/types";
 import { JsonlBuffer, toSessionEvent } from "../sessions/parser";
@@ -20,13 +27,25 @@ export interface PanelSlashCommand {
 
 export interface PanelActions {
   /** Webview からのユーザー入力。managed セッションのみで呼ばれる前提。 */
-  onSubmit?: (sessionId: string, text: string) => void;
+  onSubmit?: (
+    sessionId: string,
+    text: string,
+    attachments?: Attachment[],
+  ) => void;
   /** Webview の "Resume" 操作 (suspended な managed セッションを再起動)。 */
   onResume?: (sessionId: string) => void;
   /** Shift+Tab で次のモードへ循環したいリクエスト。 */
   onCycleMode?: (sessionId: string) => void;
   /** panel が表示直後に「いまのモード送って」と要求してきたら呼ばれる。 */
   onRequestMode?: (sessionId: string) => void;
+  /** 生成中の処理を中断 (Stop ボタン / Esc キー)。 */
+  onInterrupt?: (sessionId: string) => void;
+  /** webview の承認ダイアログから返ってきた回答 (allow / deny)。 */
+  onPermissionResponse?: (
+    sessionId: string,
+    requestId: string,
+    result: PermissionResult,
+  ) => void;
 }
 
 export class SessionPanelManager {
@@ -114,6 +133,16 @@ export class SessionPanelManager {
     const panel = this.panels.get(sessionId);
     if (!panel) return;
     panel.pushCommands(commands);
+  }
+
+  /** ツール承認依頼を webview に投げる (Allow/Deny ボタン UI を出す)。 */
+  pushPermissionRequest(
+    sessionId: string,
+    req: PermissionRequestPayload,
+  ): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.pushPermissionRequest(req);
   }
 }
 
@@ -232,6 +261,10 @@ class SessionPanel {
     this.panel.webview.postMessage({ type: "commands", commands: stripped });
   }
 
+  pushPermissionRequest(req: PermissionRequestPayload): void {
+    this.panel.webview.postMessage({ type: "permission", request: req });
+  }
+
   private async replayJsonl(state: SessionState): Promise<void> {
     if (!state.filePath || typeof state.filePath !== "string") return;
     let stat: fs.Stats;
@@ -283,8 +316,19 @@ class SessionPanel {
         break;
       case "submit": {
         const text = typeof msg.text === "string" ? msg.text.trim() : "";
-        if (!text) return;
-        this.actions.onSubmit?.(this.currentSessionId, text);
+        const rawAttach = Array.isArray(msg.attachments) ? msg.attachments : [];
+        const attachments: Attachment[] = rawAttach.flatMap((a: any) => {
+          if (
+            !a ||
+            typeof a.name !== "string" ||
+            typeof a.mediaType !== "string" ||
+            typeof a.base64 !== "string"
+          )
+            return [];
+          return [{ name: a.name, mediaType: a.mediaType, base64: a.base64 }];
+        });
+        if (!text && attachments.length === 0) return;
+        this.actions.onSubmit?.(this.currentSessionId, text, attachments);
         break;
       }
       case "resume":
@@ -293,6 +337,40 @@ class SessionPanel {
       case "cycleMode":
         this.actions.onCycleMode?.(this.currentSessionId);
         break;
+      case "interrupt":
+        this.actions.onInterrupt?.(this.currentSessionId);
+        break;
+      case "permissionResponse": {
+        const requestId =
+          typeof msg.requestId === "string" ? msg.requestId : "";
+        const decision = msg.decision;
+        if (!requestId || !decision) return;
+        let result: PermissionResult;
+        if (decision === "allow") {
+          // AskUserQuestion 等は updatedInput に回答を載せて返す必要があるので
+          // webview から来ていれば PermissionResult.allow.updatedInput に流す。
+          if (msg.updatedInput && typeof msg.updatedInput === "object") {
+            result = {
+              behavior: "allow",
+              updatedInput: msg.updatedInput as Record<string, unknown>,
+            };
+          } else {
+            result = { behavior: "allow" };
+          }
+        } else {
+          result = {
+            behavior: "deny",
+            message: typeof msg.message === "string" ? msg.message : "denied by user",
+            interrupt: !!msg.interrupt,
+          };
+        }
+        this.actions.onPermissionResponse?.(
+          this.currentSessionId,
+          requestId,
+          result,
+        );
+        break;
+      }
     }
   }
 
@@ -338,16 +416,29 @@ class SessionPanel {
       <span class="origin-badge" id="origin-badge"></span>
     </div>
   </header>
+  <!-- Cmd/Ctrl+F で表示される検索バー -->
+  <div class="ccmgr-search" id="search-bar" hidden>
+    <input type="text" id="search-input" placeholder="検索…" autocomplete="off" />
+    <span class="search-count" id="search-count">0 / 0</span>
+    <button id="search-prev" class="search-btn" title="前 (Shift+Enter)">↑</button>
+    <button id="search-next" class="search-btn" title="次 (Enter)">↓</button>
+    <button id="search-close" class="search-btn" title="閉じる (Esc)">✕</button>
+  </div>
   <main id="log" class="ccmgr-log"></main>
   <footer class="ccmgr-input" id="input-bar">
+    <!-- 添付サムネイル列 -->
+    <div class="attachments" id="attachments" hidden></div>
     <div class="input-wrap">
-      <textarea id="input-text" placeholder="Cmd+Enter で送信 (Shift+Tab でモード切替・/ でコマンド)" rows="3"></textarea>
+      <textarea id="input-text" placeholder="Cmd+Enter で送信 (Shift+Tab モード切替 / / コマンド / 📎 画像添付)" rows="3"></textarea>
       <div class="slash-dropdown" id="slash-dropdown" hidden></div>
     </div>
     <div class="input-actions">
       <span class="input-hint" id="input-hint"></span>
       <span class="mode-badge" id="mode-badge" data-mode="default" title="Shift+Tab で切替">● Default</span>
+      <input type="file" id="file-input" accept="image/*" multiple hidden />
+      <button id="btn-attach" class="btn-attach" title="画像を添付 (ドラッグ&ドロップでも可)">📎</button>
       <button id="btn-submit">Send</button>
+      <button id="btn-stop" class="btn-stop" hidden title="Esc キーでも中断可">■ Stop</button>
     </div>
   </footer>
   <script nonce="${nonce}" src="${scriptUri}"></script>

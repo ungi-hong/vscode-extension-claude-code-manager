@@ -2,13 +2,21 @@ import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
 import type {
   PermissionMode,
+  PermissionResult,
   SDKMessage,
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeProcess } from "./claudeProcess";
+import {
+  Attachment,
+  ClaudeProcess,
+  PermissionRequestPayload,
+} from "./claudeProcess";
+
+export type { Attachment, PermissionRequestPayload } from "./claudeProcess";
 
 export interface SpawnOptions {
   permissionMode?: PermissionMode;
+  pathToClaudeCodeExecutable?: string;
 }
 
 export interface CreateResult {
@@ -28,6 +36,10 @@ export declare interface ProcessManager {
   on(event: "message", listener: (id: string, msg: SDKMessage) => void): this;
   on(event: "disposed", listener: (id: string) => void): this;
   on(event: "error", listener: (id: string, err: Error) => void): this;
+  on(
+    event: "permissionRequest",
+    listener: (id: string, req: PermissionRequestPayload) => void,
+  ): this;
 }
 
 /**
@@ -44,7 +56,11 @@ export class ProcessManager extends EventEmitter {
 
   create(cwd: string, opts?: SpawnOptions): CreateResult {
     const pendingId = `pending-${randomUUID()}`;
-    const proc = new ClaudeProcess({ cwd, permissionMode: opts?.permissionMode });
+    const proc = new ClaudeProcess({
+      cwd,
+      permissionMode: opts?.permissionMode,
+      pathToClaudeCodeExecutable: opts?.pathToClaudeCodeExecutable,
+    });
     this.wire(pendingId, proc);
     this.map.set(pendingId, proc);
     proc.start();
@@ -59,6 +75,7 @@ export class ProcessManager extends EventEmitter {
       cwd,
       resumeSessionId: sessionId,
       permissionMode: opts?.permissionMode,
+      pathToClaudeCodeExecutable: opts?.pathToClaudeCodeExecutable,
     });
     this.wire(sessionId, proc);
     this.map.set(sessionId, proc);
@@ -77,6 +94,15 @@ export class ProcessManager extends EventEmitter {
     return (await this.map.get(id)?.getSupportedCommands()) ?? [];
   }
 
+  /** webview からの承認回答を該当 process に届ける。 */
+  resolvePermission(
+    id: string,
+    requestId: string,
+    result: PermissionResult,
+  ): boolean {
+    return this.map.get(id)?.resolvePermission(requestId, result) ?? false;
+  }
+
   get(id: string): ClaudeProcess | undefined {
     return this.map.get(id);
   }
@@ -90,8 +116,8 @@ export class ProcessManager extends EventEmitter {
     return this.managedSids.has(sessionId);
   }
 
-  send(id: string, text: string): boolean {
-    return this.get(id)?.send(text) ?? false;
+  send(id: string, text: string, attachments?: Attachment[]): boolean {
+    return this.get(id)?.send(text, attachments) ?? false;
   }
 
   async interrupt(id: string): Promise<void> {
@@ -131,6 +157,10 @@ export class ProcessManager extends EventEmitter {
     proc.on("error", (err) => {
       const id = this.idFor(initialId);
       this.emit("error", id, err);
+    });
+    proc.on("permissionRequest", (req) => {
+      const id = this.idFor(initialId);
+      this.emit("permissionRequest", id, req);
     });
     proc.on("disposed", () => {
       // idFor は pendingToSid を参照するため、削除前に必ず解決する。
