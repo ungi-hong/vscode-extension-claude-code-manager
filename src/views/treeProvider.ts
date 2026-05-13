@@ -4,8 +4,7 @@ import { HiddenStore } from "../sessions/hiddenStore";
 import { SessionRegistry } from "../sessions/registry";
 import { TitleStore } from "../sessions/titleStore";
 import { SessionState, SessionStatus } from "../sessions/types";
-import { SessionUsage, UsageStore } from "../sessions/usageStore";
-import { formatTokens, truncate } from "../utils/text";
+import { truncate } from "../utils/text";
 
 type TreeNode = FolderNode | SessionNode | ActionNode;
 
@@ -19,15 +18,18 @@ class FolderNode extends vscode.TreeItem {
     this.id = `folder:${entry.cwd}`;
     this.contextValue =
       entry.source === "user" ? "folder.user" : "folder.workspace";
-    this.iconPath = new vscode.ThemeIcon(
-      entry.source === "workspace" ? "root-folder" : "folder",
-    );
+    // アイコンは "folder" に統一する。`root-folder` と混在するとアイコン幅の
+    // 微妙な違いで子要素 (+ New Session) のインデントがズレて見えるため。
+    // workspace との区別は contextValue (削除ボタンの出し分け) と
+    // description 末尾の [workspace] タグで行う。
+    this.iconPath = new vscode.ThemeIcon("folder");
     const counts = countByStatus(sessions);
     const summary: string[] = [];
     if (counts.running) summary.push(`${counts.running} running`);
     if (counts.waiting) summary.push(`${counts.waiting} waiting`);
     if (counts.idle) summary.push(`${counts.idle} idle`);
     if (counts.stale) summary.push(`${counts.stale} stale`);
+    if (entry.source === "workspace") summary.push("workspace");
     this.description = summary.join(" · ");
     this.tooltip = entry.cwd;
   }
@@ -37,7 +39,6 @@ class SessionNode extends vscode.TreeItem {
   readonly kind = "session" as const;
   constructor(
     public readonly state: SessionState,
-    usage: SessionUsage | undefined,
     customTitle: string | undefined,
   ) {
     super(buildLabel(state, customTitle), vscode.TreeItemCollapsibleState.None);
@@ -45,8 +46,8 @@ class SessionNode extends vscode.TreeItem {
     this.contextValue =
       state.origin === "managed" ? "session.managed" : "session.external";
     this.iconPath = iconForState(state);
-    this.description = buildDescription(state, usage);
-    this.tooltip = buildTooltip(state, usage, customTitle);
+    this.description = buildDescription(state);
+    this.tooltip = buildTooltip(state, customTitle);
     this.command = {
       command: "claudeCodeManager.openSession",
       title: "Open Session",
@@ -57,31 +58,17 @@ class SessionNode extends vscode.TreeItem {
 
 class ActionNode extends vscode.TreeItem {
   readonly kind = "action" as const;
-  constructor(
-    public readonly action: "newSession" | "addFolder",
-    public readonly cwd?: string,
-  ) {
-    const opts: { label: string; icon: string; cmd: string } =
-      action === "newSession"
-        ? {
-            label: "+ New Session",
-            icon: "plus",
-            cmd: "claudeCodeManager.newSession",
-          }
-        : {
-            label: "+ Add Folder",
-            icon: "new-folder",
-            cmd: "claudeCodeManager.addFolder",
-          };
-    super(opts.label, vscode.TreeItemCollapsibleState.None);
-    this.id =
-      action === "newSession" ? `action:newSession:${cwd}` : "action:addFolder";
-    this.contextValue = `action.${action}`;
-    this.iconPath = new vscode.ThemeIcon(opts.icon);
+  // フォルダの子として並ぶ "+ New Session" のみ。Add Folder は viewTitle の
+  // ツールバー ($(new-folder)) に寄せたためツリー内には出さない。
+  constructor(public readonly cwd: string) {
+    super("+ New Session", vscode.TreeItemCollapsibleState.None);
+    this.id = `action:newSession:${cwd}`;
+    this.contextValue = "action.newSession";
+    this.iconPath = new vscode.ThemeIcon("plus");
     this.command = {
-      command: opts.cmd,
-      title: opts.label,
-      arguments: cwd ? [{ cwd }] : [],
+      command: "claudeCodeManager.newSession",
+      title: "+ New Session",
+      arguments: [{ cwd }],
     };
   }
 }
@@ -92,13 +79,11 @@ export class SessionsTreeProvider
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
   private timer: NodeJS.Timeout;
-  private debounceTimer?: NodeJS.Timeout;
 
   constructor(
     private registry: SessionRegistry,
     private hiddenStore: HiddenStore,
     private folders: FolderStore,
-    private usageStore: UsageStore,
     private titleStore: TitleStore,
   ) {
     registry.on("changed", () => this._onDidChangeTreeData.fire(undefined));
@@ -111,8 +96,6 @@ export class SessionsTreeProvider
     titleStore.on("changed", () =>
       this._onDidChangeTreeData.fire(undefined),
     );
-    // 複数 managed セッション同時 result 連発時の再描画を 200ms 圧縮
-    usageStore.on("changed", () => this.scheduleDebouncedRefresh());
     this.timer = setInterval(
       () => this._onDidChangeTreeData.fire(undefined),
       30_000,
@@ -125,16 +108,7 @@ export class SessionsTreeProvider
 
   dispose(): void {
     clearInterval(this.timer);
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this._onDidChangeTreeData.dispose();
-  }
-
-  private scheduleDebouncedRefresh(): void {
-    if (this.debounceTimer) return;
-    this.debounceTimer = setTimeout(() => {
-      this.debounceTimer = undefined;
-      this._onDidChangeTreeData.fire(undefined);
-    }, 200);
   }
 
   getTreeItem(element: TreeNode): vscode.TreeItem {
@@ -171,60 +145,85 @@ export class SessionsTreeProvider
         if (bLast !== aLast) return bLast - aLast;
         return labelOf(a.entry).localeCompare(labelOf(b.entry));
       });
-      return [...folderNodes, new ActionNode("addFolder")];
+      // "+ Add Folder" はツリー内には出さない。viewTitle の toolbar
+      // ($(new-folder)) で同等機能を提供する。
+      return folderNodes;
     }
     if (element.kind === "folder") {
       const sessionItems = element.sessions.map(
-        (s) =>
-          new SessionNode(
-            s,
-            this.usageStore.get(s.sessionId),
-            this.titleStore.get(s.sessionId),
-          ),
+        (s) => new SessionNode(s, this.titleStore.get(s.sessionId)),
       );
-      return [new ActionNode("newSession", element.entry.cwd), ...sessionItems];
+      return [new ActionNode(element.entry.cwd), ...sessionItems];
     }
     return [];
   }
 }
 
 const buildLabel = (s: SessionState, customTitle?: string): string => {
-  const branch = s.gitBranch ? ` (${s.gitBranch})` : "";
   // 優先順位: ① 手動で付けたカスタム題名 ② 最初の user メッセージ (auto) ③ sessionId 先頭8文字
-  const title =
+  // 状態は iconPath (VS Code アイコン) が表現するので label には glyph を付けない。
+  // ブランチも description 側に移して label は「題名そのもの」に絞る。
+  return (
     customTitle ||
     autoTitleFromFirstPrompt(s.firstUserPrompt) ||
-    s.sessionId.slice(0, 8);
-  return `${statusGlyph(s)} ${title}${branch}`;
+    s.sessionId.slice(0, 8)
+  );
 };
 
+/**
+ * Claude Code が user prompt に挿入する `<command-message>` / `<command-name>` /
+ * `<local-command-*>` / `<system-reminder>` のような特殊タグを取り除き、
+ * 人間可読な auto title を生成する。
+ *
+ * 例:
+ * - `<command-message>fe-pr:fe-pr</command-message>` → `/fe-pr`
+ * - `<command-name>create-pr</command-name>\n<command-args>...` → `/create-pr ...`
+ * - 通常テキスト → そのまま (40 文字超は省略)
+ */
 const autoTitleFromFirstPrompt = (raw?: string): string => {
   if (!raw) return "";
-  // 改行・連続空白を 1 スペースに潰し、先頭 40 文字程度に切る (title 用)
-  const oneLine = raw.replace(/\s+/g, " ").trim();
-  if (!oneLine) return "";
-  if (oneLine.length <= 40) return oneLine;
-  return oneLine.slice(0, 39) + "…";
+  // 1) slash command 実行を示すパターンを優先的に抽出
+  const cmdName = raw.match(/<command-name>([^<]+)<\/command-name>/);
+  if (cmdName) {
+    const name = cmdName[1].trim().replace(/^\/+/, "").split(":")[0];
+    const argMatch = raw.match(/<command-args>([^<]*)<\/command-args>/);
+    const args = argMatch ? argMatch[1].trim() : "";
+    return truncateOneLine(args ? `/${name} ${args}` : `/${name}`, 40);
+  }
+  // command-message タグだけがあるケース (XML のみで本文がない場合) も拾う
+  const cmdMsg = raw.match(/<command-message>([^<]+)<\/command-message>/);
+  if (cmdMsg) {
+    const name = cmdMsg[1].trim().replace(/^\/+/, "").split(":")[0];
+    return truncateOneLine(`/${name}`, 40);
+  }
+  // 2) その他の XML 風タグを除去してプレーン化
+  const plain = raw
+    .replace(/<[^>]+>/g, " ") // タグ全般を空白に
+    .replace(/\s+/g, " ")
+    .trim();
+  return truncateOneLine(plain, 40);
 };
 
-const buildDescription = (
-  s: SessionState,
-  usage: SessionUsage | undefined,
-): string => {
+const truncateOneLine = (s: string, max: number): string => {
+  if (!s) return "";
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+};
+
+const buildDescription = (s: SessionState): string => {
+  // description は label の右に薄字で出る補足情報。短く整理する。
+  // 順序: [branch] · preview · elapsed
+  const branch = s.gitBranch ? `[${s.gitBranch}]` : "";
   const preview = s.lastAssistantText ?? s.lastUserPrompt ?? "";
   const compact = preview.replace(/\s+/g, " ").trim();
+  // プレビューは 36 文字程度に抑える (長文だと elapsed が埋もれるため)。
+  const head = compact ? truncate(compact, 36) : "";
   const elapsed = formatElapsed(Date.now() - s.lastEventAt);
-  // managed = 拡張内チャット可 / external = 外部 (jsonl 観測のみ、直接対話できない)
-  const tag = s.origin === "managed" ? "chat" : "履歴";
-  const head = compact ? `「${truncate(compact, 60)}」` : "";
-  // managed セッションのみ token サマリを表示。external は `—` で揃える。
-  const tokens = formatSessionTokens(s, usage);
-  return [tag, head, tokens, elapsed].filter(Boolean).join(" · ");
+  return [branch, head, elapsed].filter(Boolean).join(" · ");
 };
 
 const buildTooltip = (
   s: SessionState,
-  usage: SessionUsage | undefined,
   customTitle?: string,
 ): vscode.MarkdownString => {
   const md = new vscode.MarkdownString();
@@ -242,19 +241,6 @@ const buildTooltip = (
   md.appendMarkdown(
     `**Last event**: ${new Date(s.lastEventAt).toLocaleString()}`,
   );
-  if (usage && usage.contextWindow > 0) {
-    const used = formatTokens(usage.totalTokens);
-    const max = formatTokens(usage.contextWindow);
-    const remaining = formatTokens(usage.contextWindow - usage.totalTokens);
-    md.appendMarkdown(
-      `\n\n---\n\n**Tokens**: ${used} / ${max} (残り ${remaining})\n\n`,
-    );
-    md.appendMarkdown(`**Cost**: $${usage.totalCostUsd.toFixed(4)}`);
-  } else if (usage && usage.totalCostUsd > 0) {
-    md.appendMarkdown(
-      `\n\n---\n\n**Cost**: $${usage.totalCostUsd.toFixed(4)}`,
-    );
-  }
   if (s.lastUserPrompt) {
     md.appendMarkdown(`\n\n---\n\n**User**: ${truncate(s.lastUserPrompt, 200)}`);
   }
@@ -266,20 +252,18 @@ const buildTooltip = (
   return md;
 };
 
-const statusGlyph = (s: SessionState): string => {
-  if (s.isSuspended) return "⏸";
-  switch (s.status) {
-    case "running":
-      return "●";
-    case "waiting":
-      return "⚠";
-    case "idle":
-      return "○";
-    case "stale":
-      return "·";
-  }
-};
-
+/**
+ * セッションの状態アイコンを「経過時間軸」で整理する。
+ *
+ * - running        : Claude が思考中 → ローディング (青クルクル)
+ * - 30 分以内      : アクティブ (waiting / idle) → 青枠丸
+ * - 30 分超過      : stale → ⏸ (グレー)
+ * - isSuspended    : ユーザー停止 → ⏸ (紫) で他と区別
+ *
+ * 30 分の閾値は config `claudeCodeManager.staleAfterMinutes` で
+ * registry が既に `status === "stale"` を割り当ててくれているので、ここでは
+ * `status` を信用してアイコンを引き当てるだけでよい。
+ */
 const iconForState = (s: SessionState): vscode.ThemeIcon => {
   if (s.isSuspended) {
     return new vscode.ThemeIcon(
@@ -287,30 +271,28 @@ const iconForState = (s: SessionState): vscode.ThemeIcon => {
       new vscode.ThemeColor("charts.purple"),
     );
   }
-  return iconForStatus(s.status, s.origin);
+  return iconForStatus(s.status);
 };
 
-const iconForStatus = (
-  status: SessionStatus,
-  origin: SessionState["origin"],
-): vscode.ThemeIcon => {
-  const color = origin === "managed" ? "charts.green" : "charts.blue";
+const iconForStatus = (status: SessionStatus): vscode.ThemeIcon => {
   switch (status) {
     case "running":
-      return new vscode.ThemeIcon("loading~spin", new vscode.ThemeColor(color));
-    case "waiting":
+      // 生成中: 青のクルクル
       return new vscode.ThemeIcon(
-        "question",
-        new vscode.ThemeColor("charts.yellow"),
+        "loading~spin",
+        new vscode.ThemeColor("charts.blue"),
       );
+    case "waiting":
     case "idle":
+      // 直近 30 分以内のアクティブ: 青枠丸
       return new vscode.ThemeIcon(
         "circle-outline",
-        new vscode.ThemeColor(color),
+        new vscode.ThemeColor("charts.blue"),
       );
     case "stale":
+      // 30 分超過: 一時停止アイコンで休眠を示す (グレー)
       return new vscode.ThemeIcon(
-        "circle-slash",
+        "debug-pause",
         new vscode.ThemeColor("disabledForeground"),
       );
   }
@@ -327,14 +309,5 @@ const formatElapsed = (ms: number): string => {
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
-};
-
-const formatSessionTokens = (
-  s: SessionState,
-  usage: SessionUsage | undefined,
-): string => {
-  if (s.origin !== "managed") return "—";
-  if (!usage || usage.contextWindow === 0) return "";
-  return `${formatTokens(usage.totalTokens)}/${formatTokens(usage.contextWindow)}`;
 };
 

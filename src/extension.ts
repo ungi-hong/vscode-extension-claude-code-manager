@@ -10,7 +10,6 @@ import {
 } from "./sessions/parser";
 import { SessionRegistry } from "./sessions/registry";
 import { TitleStore } from "./sessions/titleStore";
-import { UsageStore } from "./sessions/usageStore";
 import { SessionWatcher } from "./sessions/watcher";
 import { scanCustomCommands } from "./utils/customCommands";
 import { sessionJsonlPath } from "./utils/projectsPath";
@@ -89,31 +88,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const hiddenStore = new HiddenStore(context.globalState);
   const folders = new FolderStore(context.globalState);
-  const usageStore = new UsageStore(context.globalState);
   const titleStore = new TitleStore(context.globalState);
 
-  // 順序的に usageStore 宣言後に listener を登録 (const の TDZ 回避)
   watcher.on("event", (evt) => {
     registry.ingest(evt);
-    // assistant メッセージの usage を block 集計用にも流す
-    usageStore.ingestJsonlEvent(evt);
   });
 
   const treeProvider = new SessionsTreeProvider(
     registry,
     hiddenStore,
     folders,
-    usageStore,
     titleStore,
   );
   const treeView = vscode.window.createTreeView("ccmgr.sessions", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
-  const rabbitProvider = new RabbitWebviewProvider(
-    context.extensionUri,
-    usageStore,
-  );
+  const rabbitProvider = new RabbitWebviewProvider(context.extensionUri);
   const rabbitRegistration = vscode.window.registerWebviewViewProvider(
     RabbitWebviewProvider.viewType,
     rabbitProvider,
@@ -276,11 +267,10 @@ export function activate(context: vscode.ExtensionContext): void {
     panelManager.pushPermissionRequest(id, req);
   });
 
-  // ProcessManager のイベントを Tree / Panel / Persistence / UsageStore に橋渡し。
+  // ProcessManager のイベントを Tree / Panel / Persistence に橋渡し。
   processManager.on("promoted", ({ pendingId, sessionId }) => {
     registry.promotePending(pendingId, sessionId);
     panelManager.rekey(pendingId, sessionId);
-    usageStore.rename(pendingId, sessionId);
     void titleStore.rename(pendingId, sessionId);
     // sessionModes は pending- 側で保持していたので confirmed id に移す
     const pendingMode = sessionModes.get(pendingId);
@@ -363,15 +353,6 @@ export function activate(context: vscode.ExtensionContext): void {
       pushCommandsToPanel(id, true);
     }
 
-    // ⚠ rate_limit_event はアカウント全体の情報なので、session_id が pending-
-    // (まだ promote されてない) の段階でも ingest する。早期 return の前で処理する。
-    if (isRateLimitEvent(msg)) {
-      const accepted = usageStore.ingestRateLimit(msg);
-      output.appendLine(
-        `  rate_limit ingest=${accepted ? "OK" : "REJECTED"}`,
-      );
-    }
-
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
     if (id.startsWith("pending-")) return;
     if (isAssistantMessage(msg)) {
@@ -380,8 +361,6 @@ export function activate(context: vscode.ExtensionContext): void {
     } else if (isUserMessage(msg)) {
       const text = extractUserSummary(msg);
       if (text) void managedStore.update(id, { lastUserPrompt: text });
-    } else if (isResultMessage(msg)) {
-      usageStore.ingestResult(id, msg);
     }
   });
   processManager.on("disposed", (id) => {
@@ -401,7 +380,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
   });
 
-  const statusBar = new StatusBar(registry, usageStore);
+  const statusBar = new StatusBar(registry);
 
   context.subscriptions.push(
     output,
@@ -551,7 +530,6 @@ export function activate(context: vscode.ExtensionContext): void {
         await managedStore.remove(sessionId);
         panelManager.disposePanel(sessionId);
         registry.removeSession(sessionId);
-        usageStore.dispose(sessionId);
       },
     ),
     vscode.commands.registerCommand(
@@ -629,7 +607,6 @@ export function activate(context: vscode.ExtensionContext): void {
       void watcher.stop();
       void processManager.disposeAll();
       folders.dispose();
-      usageStore.dispose();
     },
   });
 }
@@ -683,12 +660,3 @@ const isUserMessage = (
 ): msg is Extract<SDKMessage, { type: "user" }> =>
   msg?.type === "user";
 
-const isResultMessage = (
-  msg: SDKMessage,
-): msg is Extract<SDKMessage, { type: "result" }> =>
-  msg?.type === "result";
-
-const isRateLimitEvent = (
-  msg: SDKMessage,
-): msg is Extract<SDKMessage, { type: "rate_limit_event" }> =>
-  msg?.type === "rate_limit_event";
