@@ -1,105 +1,257 @@
-# Claude Code Manager — VSCode / Cursor 拡張
+# Claude Code Manager 🐰
 
-並行で動作している複数の Claude Code セッションをサイドバーで一覧し、Webview 上で対話できるようにする拡張機能 (実装中)。
+複数の Claude Code セッションを **VSCode / Cursor のサイドバー** で管理し、Webview 上で対話できる拡張機能。
+公式 Claude Code CLI の使い心地 (Shift+Tab モード切替・slash command 補完・トークン使用率モニタ) を **エディタの中で全部やる** がコンセプト。
 
-## ステータス
+---
 
-**Stage C 完了** — 拡張内 SDK チャット + 再起動 resume まで揃いました。
+## ✨ 主な機能
 
-| ステージ | 内容 | ステータス |
+### 🐰 トークン使用率モニタ (にんじん畑メタファー)
+
+![rabbit](src/views/images/rabbit-20.gif) ![rabbit](src/views/images/rabbit-60.gif) ![rabbit](src/views/images/rabbit-100.gif)
+
+- うさぎがにんじん食べるアニメ GIF (5 段階) で **今のトークン使用率を直感表示**
+- 0〜20% ぴょんぴょん → 80〜100% 食べきり寸前
+- SDK の `rate_limit_event` から `claude.ai` 公式 utilization を取得
+- 「現在のセッション (5h 枠)」「週間制限 (週次)」をプログレスバー付きで表示 (Claude 公式 UI と用語統一)
+- 同時に **現在の 5h ブロック**の累計トークン (`used / total tokens`) / バーンレート / 残り時間 / 入出力&キャッシュ内訳も併記
+
+### 🔐 権限モード切替 (Shift+Tab)
+
+公式 CLI と同じ感覚で **入力欄にフォーカスして Shift+Tab** を押すたびに権限モードが循環:
+
+```
+Default  →  Accept Edits  →  Plan  →  Default …
+```
+
+- 入力欄右下のバッジで現在のモードを色付き表示 (灰/緑/青/赤)
+- SDK の `Query.setPermissionMode()` で **セッション再起動なし**に切替
+- VSCode 設定 `claudeCodeManager.defaultPermissionMode` で起動時のデフォルトモードを選択 (`default` / `plan` / `acceptEdits` / `bypassPermissions`)
+- `bypassPermissions` = `--dangerously-skip-permissions` 相当 (自己責任)
+
+### ⌨️ Slash command 補完
+
+入力欄で `/` を打つとドロップダウン補完が開く:
+
+| ソース | 例 | バッジ |
 |---|---|---|
-| Stage A | ターミナル連携削除 + フォルダ階層 + 既存セッション読み取り表示 | ✅ 完了 |
-| Stage B | 拡張内 `@anthropic-ai/claude-agent-sdk` 経由で claude を起動・チャット | ✅ 完了 |
-| Stage C | 再起動時のセッション resume + ストリーミング UI | ✅ 完了 |
+| SDK 組み込み | `/help` `/clear` `/compact` `/cost` `/model` … | — |
+| User 定義 | `~/.claude/commands/**/*.md` | 🟣 USER |
+| Project 定義 | `<cwd>/.claude/commands/**/*.md` | 🔵 PROJECT |
+| Plugin 由来 | `~/.claude/plugins/cache/<marketplace>/<plugin>/<ver>/commands/*.md` (例: `/fe-pr:fe-pr`) | 🟠 PLUGIN |
 
-## できること
+操作:
+- ↑↓ で選択 / `Enter` または `Tab` で確定 / `Esc` でキャンセル
+- **部分一致 + 優先度スコア** でフィルタ (name 前方一致 > alias 前方一致 > name 部分一致 > description 部分一致)
+
+### 📋 セッション管理
 
 - Activity Bar に **🤖 Claude Code Manager** アイコン
-- サイドバー TreeView に **フォルダ → セッション** の階層
-  - フォルダ = リポジトリ (cwd)。`+ Add Folder` で手動追加 / 現在の VSCode workspace folder は自動取り込み
-  - 各フォルダ配下に `+ New Session` と既存セッション一覧
-- **拡張内チャット** (Stage B):
-  - `+ New Session` でその場に claude セッションを起動 (`@anthropic-ai/claude-agent-sdk` 経由)
-  - Webview パネルでチャット (Cmd+Enter で送信)
-  - ストリーミング応答 (`text_delta` を progressive 表示)
-  - 「考えています…」ドットアニメーションでフィードバック
-  - エラー / 接続 / コンテキスト圧縮などのステータス行
-- **既存ターミナル起動セッションの引き継ぎ**:
-  - Tree に表示されているセッションをクリックして Webview を開き、入力欄に送信すると **拡張側で `claude --resume <sid>`** を呼んで以後はチャットで継続可能
-  - jsonl 履歴は再生されるので会話の流れも残る
-- **再起動 resume** (Stage C):
-  - 拡張内で起動した managed セッションは `globalState` に永続化
-  - VSCode/Cursor を再起動すると Tree に **⏸ suspended** で並ぶ
-  - クリック → Webview を開いて入力すると自動で `claude --resume <sid>` が走り、続きから再開
-  - 不要になった managed セッションは右クリックメニュー「Forget Managed Session」で削除 (jsonl 自体は残る)
-- ステータス表示: `running` / `idle` / `waiting` / `stale` / `⏸ suspended`
+- TreeView で **フォルダ (cwd) → セッション** の 2 階層
+- `+ New Session` で SDK 経由のチャットセッションを起動
+- 既存のターミナル起動セッション (`claude` を CLI で立ち上げたもの) も Tree に自動表示 → クリックで Webview を開いて resume 可能
+- セッション状態: `running` / `idle` / `stale` をアイコン色分け
+- VSCode / Cursor 再起動後も Tree に **⏸ suspended** で並び、クリックで自動 resume
 - `Hide from Sidebar` で個別アーカイブ、`Show Hidden Sessions...` で復元
-- StatusBar に件数バッジ
 
-## 設計上のポイント
+### 💬 Webview チャット
 
-- **誤マッチ事故ゼロ**: ターミナル側の claude プロセスを拡張から触りに行く処理は完全に廃止。「同じ sessionId で外部と拡張の両方が動く可能性」はユーザーに警告のみ。
-- **二重ソース防止**: managed セッションは SDK のストリームを真実とし、jsonl watcher のイベントは Webview に流さない。external セッションは jsonl が真実。
-- **pending → 確定 sessionId**: SDK の `system.init` 受信前は `pending-<uuid>` で扱い、init 受信時に Tree / Panel / Persistence を一斉に rename。
+- 入力欄: `Cmd+Enter` (macOS) / `Ctrl+Enter` で送信
+- ストリーミング応答 (`text_delta` を progressive 表示)
+- 「考えています…」ドットアニメーション、ステータス行 (エラー / 接続 / コンテキスト圧縮等)
+- 過去 JSONL 履歴を自動 replay (古いセッション開いても会話が出る)
 
-## インストール
+### 🛠 自動回復機能
+
+- **Zombie session 修復**: 空 JSONL ファイル (init 受信したが会話無しのセッション) を resume しようとするとエラーになる SDK の振る舞いに対して、**自動で新規セッションに切替**してメッセージ送信を継続
+- **古いセッション履歴復元**: 24h より古いセッションでも `~/.claude/projects/.../<sid>.jsonl` を直接探して再生 → tree から開けば履歴が見える
+
+---
+
+## 🚀 インストール
+
+### VSCode
+
+```bash
+# CLI で一発
+code --install-extension claude-code-manager-0.1.0.vsix
+```
+
+または GUI:
+Extensions ビュー → 右上の `…` → `Install from VSIX...` → `.vsix` ファイル選択 → リスタート
+
+### Cursor
+
+```bash
+cursor --install-extension claude-code-manager-0.1.0.vsix
+```
+
+`cursor` コマンドが無ければ Cursor 内で `Cmd+Shift+P` → `Shell Command: Install 'cursor' command in PATH` で PATH に追加可能。
+GUI 手順は VSCode と同じ。Cursor は VSCode 1.93+ ベースなので互換あり。
+
+---
+
+## ⚙️ 設定 (Settings)
+
+`Cmd+,` (`Ctrl+,`) → `claude code manager` で検索:
+
+| キー | デフォルト | 説明 |
+|---|---|---|
+| `claudeCodeManager.defaultPermissionMode` | `default` | 新規セッションの初期権限モード。`bypassPermissions` で `--dangerously-skip-permissions` 相当 |
+| `claudeCodeManager.staleAfterMinutes` | `30` | この分数以上更新が無いセッションを `stale` (薄表示) にする |
+| `claudeCodeManager.hideSessionsOlderThanHours` | `24` | 起動時に何時間以上前の JSONL を初期 load から除外するか |
+| `claudeCodeManager.maxEventsPerSession` | `200` | registry に保持する 1 セッションあたりの直近イベント数 |
+
+### `~/.claude/settings.json` (Claude Code 公式) との関係
+
+この拡張は `options.permissionMode` を SDK に **明示的に渡す**ため、`~/.claude/settings.json` の `permissions.defaultMode` は**上書きされる**。永続的に bypass にしたい場合は VSCode 設定の `claudeCodeManager.defaultPermissionMode` で設定してね。
+
+---
+
+## 🎯 使い方クイックリファレンス
+
+| やりたいこと | 操作 |
+|---|---|
+| 新規セッション起動 | フォルダ行の `+` アイコン or 右クリック → `New Session` |
+| チャット送信 | 入力欄に書いて `Cmd+Enter` |
+| 権限モード切替 | 入力欄にフォーカス → `Shift+Tab` |
+| Slash コマンド | `/` 入力 → ↑↓ で選択 → `Enter` |
+| 過去セッション開く | Tree のセッション名をクリック → Webview に履歴が再生される |
+| 出力ログ確認 | コマンドパレット → `Claude Code Manager: Show Output Logs` |
+| 隠したセッション復元 | コマンドパレット → `Show Hidden Sessions...` |
+| セッション完全削除 | Tree で右クリック → `Forget Managed Session` (JSONL 自体は残る) |
+
+---
+
+## 🏗 アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  VSCode Extension Host                                       │
+│                                                              │
+│  ┌────────────────┐  ┌──────────────────┐  ┌─────────────┐ │
+│  │ SessionWatcher │→│ SessionRegistry  │→│ TreeProvider │ │
+│  │ (~/.claude/    │  │ (in-memory state)│  │ (sidebar UI)│ │
+│  │   projects 監視)│  └──────────────────┘  └─────────────┘ │
+│  └────────────────┘                                          │
+│         │                                                    │
+│         ↓ ingest                                             │
+│  ┌──────────────┐                                            │
+│  │ UsageStore   │← rate_limit_event ─┐                       │
+│  │ (block 集計  │                    │                       │
+│  │  + 公式枠)   │                    │                       │
+│  └──────────────┘                    │                       │
+│         │                            │                       │
+│         ↓ summary                    │                       │
+│  ┌──────────────────┐        ┌─────────────────┐            │
+│  │ RabbitWebview    │        │ ProcessManager  │            │
+│  │ (🐰 トークン     │        │ (SDK session    │            │
+│  │  使用率パネル)   │        │  spawn / proxy) │            │
+│  └──────────────────┘        └─────────────────┘            │
+│                                       │                      │
+│                                       ↓                      │
+│                              ┌──────────────────┐            │
+│                              │  ClaudeProcess   │            │
+│                              │  (@anthropic-ai/ │            │
+│                              │  claude-agent-sdk│            │
+│                              │  ラッパー)       │            │
+│                              └──────────────────┘            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+主要ファイル:
+
+```
+src/
+├── extension.ts                ← activate / コマンド登録 / 全体配線
+├── runtime/
+│   ├── claudeProcess.ts        ← SDK Query ラッパー (setPermissionMode / supportedCommands)
+│   ├── processManager.ts       ← pending- → 確定 sid の rename / proxy
+│   └── persistence.ts          ← managed session の globalState 永続化
+├── sessions/
+│   ├── watcher.ts              ← ~/.claude/projects/**/*.jsonl 監視
+│   ├── parser.ts               ← JSONL → SessionEvent
+│   ├── registry.ts             ← SessionState を in-memory に集約
+│   └── usageStore.ts           ← トークン累計 + 5h ブロック + rate_limit
+├── views/
+│   ├── rabbitView.ts           ← 🐰 トークン使用率 WebviewView
+│   ├── sessionPanel.ts         ← セッションごとの Webview パネル
+│   ├── treeProvider.ts         ← サイドバー TreeView
+│   ├── statusBar.ts            ← ステータスバー
+│   ├── images/rabbit-{20..100}.gif
+│   └── webview/
+│       ├── main.ts             ← Webview UI スクリプト (Shift+Tab / slash 等)
+│       └── style.css
+└── utils/
+    ├── projectsPath.ts         ← ~/.claude/projects/<encoded>/<sid>.jsonl 解決
+    ├── customCommands.ts       ← ~/.claude/commands + plugins スキャナ
+    └── text.ts                 ← formatTokens 等
+```
+
+### 設計判断
+
+- **誤マッチ事故ゼロ**: ターミナル側の claude プロセスを拡張から触りに行く処理は完全に廃止。「同じ sessionId で外部と拡張の両方が動く可能性」はユーザーに警告のみ
+- **二重ソース防止**: managed セッションは SDK のストリームを真実とし、jsonl watcher のイベントは Webview に流さない。external セッションは jsonl が真実
+- **pending → 確定 sessionId**: SDK の `system.init` 受信前は `pending-<uuid>` で扱い、init 受信時に Tree / Panel / Persistence を一斉に rename
+- **`rate_limit_event` の pending 期間取りこぼし対策**: アカウント全体情報なので session_id が確定前でも ingest する
+
+---
+
+## 🧑‍💻 開発
+
+### 必要環境
+
+- Node.js 22+
+- pnpm (推奨) / npm
+- VSCode 1.90+ (Cursor 含む)
+
+### セットアップ
 
 ```bash
 git clone <this-repo>
 cd vscode-extension-claude-code-manager
 pnpm install
-pnpm build
-pnpm package   # → claude-code-manager-0.1.0.vsix
+pnpm run build           # esbuild で dist/extension.js & dist/webview/main.js 出力
+npx tsc -p . --noEmit    # 型チェック
+pnpm test                # vitest
 ```
 
-VSCode/Cursor で `Extensions: Install from VSIX...` から `.vsix` を選択。
+### F5 で Extension Development Host 起動
 
-開発中は本リポジトリを VSCode/Cursor で開いて `F5` で Extension Development Host が起動します。
+VSCode / Cursor でこのリポジトリを開いて **F5** → 別ウィンドウで拡張がロード済の Extension Development Host が起動。
 
-## 設定
+### .vsix パッケージ生成
 
-| 設定キー | 既定値 | 説明 |
-| --- | --- | --- |
-| `claudeCodeManager.staleAfterMinutes` | `30` | 最終イベントから何分経過したら `stale` 表示にするか |
-| `claudeCodeManager.hideSessionsOlderThanHours` | `24` | 起動時に何時間以上前のセッションを初期表示から除外するか |
-| `claudeCodeManager.maxEventsPerSession` | `200` | registry が保持する 1 セッションあたりの直近イベント数 |
-
-## アーキテクチャ
-
-```
-SessionWatcher (chokidar + JSONL tailer) ──── jsonl 由来の event ────┐
-                                                                     │
-ManagedSessionStore (globalState 永続化) ── activate 時に suspended 復元
-                                                                     ▼
-                                                          SessionRegistry
-                                                          (origin: external | managed)
-                                                                     │
-ProcessManager ── SDK message ─── SessionPanelManager ◄──────────────┤
-   ↑                                  │                              │
-   │ submit                           ▼                              ▼
-   └─ Webview ◄─────────── postMessage (stream / status)         TreeView
+```bash
+npx @vscode/vsce package --no-dependencies
+# → claude-code-manager-0.1.0.vsix
 ```
 
-**主要ファイル:**
+---
 
-- `src/sessions/watcher.ts` — `~/.claude/projects/**/*.jsonl` を chokidar で watch
-- `src/sessions/registry.ts` — セッション状態管理。`origin` で managed/external を区別
-- `src/folders/store.ts` — 登録フォルダの永続化 (globalState) + workspace 自動取り込み
-- `src/runtime/claudeProcess.ts` — SDK `query()` を AsyncIterable 入力でラップ
-- `src/runtime/processManager.ts` — sessionId 単位の ClaudeProcess を保持、pending → 確定 ID リネーム
-- `src/runtime/persistence.ts` — managed セッションのスナップショット永続化
-- `src/views/treeProvider.ts` — フォルダ → セッションの 2 段階階層
-- `src/views/sessionPanel.ts` — Webview パネル (チャット入力欄あり)
-- `src/views/webview/main.ts` — ストリーム表示 + 「考えています…」インジケーター
+## 🐛 トラブルシューティング
 
-## 設計判断
+### うさぎの「現在のセッション」「週間制限」セクションが出ない
 
-**なぜターミナル連携をやめたか:**
-過去 6 回の修正にもかかわらず、外部から「claude プロセスと sessionId を確実に紐付ける手段」が無く誤マッチが残りました。Stage B 以降は **拡張内から SDK 経由で claude を起動** することで claude プロセスと sessionId の対応を確定させ、誤マッチを根絶します。
+- SDK の `rate_limit_event` は **claude.ai サブスク (OAuth 認証)** ユーザーにのみ発火する仕様
+- 確認: コマンドパレット → `Claude Code Manager: Show Output Logs` で出力ログを開く
+- `init: apiKeySource=oauth` なら subscription 認証 → 使用率変化で発火
+- `init: apiKeySource=user` なら API key 直認証 → **発火しない仕様**。`claude logout` してから `claude` で OAuth 認証し直す必要あり
 
-**なぜ既存ターミナルセッションの操作はサポートしないか:**
-ターミナル側で動いている claude プロセスを拡張から触ると、stdin の衝突・jsonl の競合書き込みでセッション破壊の危険があります。**読み取り専用にすることで事故ゼロを保証** します。
+### 古いセッションを開いたら履歴が出ない
 
-## ライセンス
+- 24h より古い JSONL は `SessionWatcher` の初期 load から除外される設計
+- 拡張は `<cwd>/.claude/projects/.../<sid>.jsonl` を後追いで読み込んで再生する
+- それでも出ない場合は JSONL ファイル自体が空 (0 byte) の可能性 → zombie 修復が自動で動いて新規セッション切替するはず
+
+### "No conversation found with session ID" エラー
+
+- 空 JSONL を resume しようとした時の SDK エラー
+- 自動修復で同じ cwd に新規セッションが立ち上がるはず (panel 内に `履歴が空のため新規セッションに切り替えます…` 通知が出る)
+
+---
+
+## 📜 ライセンス
 
 MIT
