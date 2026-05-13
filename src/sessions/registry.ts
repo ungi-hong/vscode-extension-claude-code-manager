@@ -184,7 +184,13 @@ export class SessionRegistry extends EventEmitter {
     const role = evt.raw?.message?.role;
     if (evt.type === "user" || role === "user") {
       const text = extractUserText(evt.raw);
-      if (text) state.lastUserPrompt = truncate(text, 280);
+      if (text) {
+        state.lastUserPrompt = truncate(text, 280);
+        // auto-title: 最初の user メッセージを保持 (以後の発言では上書きしない)
+        if (!state.firstUserPrompt) {
+          state.firstUserPrompt = truncate(text, 280);
+        }
+      }
     } else if (evt.type === "assistant" || role === "assistant") {
       const text = extractAssistantText(evt.raw);
       if (text) state.lastAssistantText = truncate(text, 280);

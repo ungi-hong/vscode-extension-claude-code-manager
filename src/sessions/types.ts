@@ -45,6 +45,8 @@ export interface SessionState {
   filePath: string;
   startedAt: number;
   lastEventAt: number;
+  /** 最初に送信された user メッセージ (auto-title 用)。確定したら以後上書きしない。 */
+  firstUserPrompt?: string;
   lastUserPrompt?: string;
   lastAssistantText?: string;
   lastAssistantStopReason?: string;
