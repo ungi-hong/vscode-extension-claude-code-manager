@@ -26,6 +26,13 @@ export interface ClaudeProcessOptions {
    * `../mep-frontend` のような sibling リポジトリを事前許可するときに使う。
    */
   additionalDirectories?: string[];
+  /**
+   * `canUseTool` callback などの内部イベントを extension の OutputChannel に
+   * 流すための optional logger。AskUserQuestion 起動経路の調査用 (どのモードで
+   * どの tool が canUseTool を発火させたか / panel が drop していないか等)。
+   * 渡されていない場合は no-op。
+   */
+  logger?: (msg: string) => void;
 }
 
 /** ユーザーが添付する画像 1 枚分 (webview → ext → SDK 経由で送る)。 */
@@ -115,6 +122,12 @@ export class ClaudeProcess extends EventEmitter {
       return new Promise<PermissionResult>((resolve) => {
         const requestId = randomUUID();
         this.pendingPermissions.set(requestId, resolve);
+        // AskUserQuestion がスキップされる事象の調査用ログ。どのモード下で
+        // どのツールが canUseTool に到達したか、また pending として登録されたか
+        // をすべて記録する。発火していないなら SDK 側で auto-deny されている可能性。
+        this.options.logger?.(
+          `[ccmgr] canUseTool fired tool=${toolName} mode=${mode ?? "default"} reqId=${requestId.slice(0, 8)} tuid=${(options.toolUseID ?? "").slice(0, 8)}`,
+        );
         // abort 連携: SDK が中断したら deny として promise を resolve
         if (options.signal) {
           options.signal.addEventListener(

@@ -142,14 +142,151 @@ export class SessionPanelManager {
     panel.pushCommands(commands);
   }
 
-  /** ツール承認依頼を webview に投げる (Allow/Deny ボタン UI を出す)。 */
+  /**
+   * ツール承認依頼を webview に投げる (Allow/Deny ボタン UI を出す)。
+   *
+   * AskUserQuestion がスキップされる事象への対策として:
+   *   1. panel が無ければ自動 open。質問が消えると Claude が推測で進んでしまうので
+   *      ユーザーに必ず見せたい。
+   *   2. panel があっても `reveal()` で前面化 (preserveFocus=false なので focus も移る)。
+   *   3. AskUserQuestion の場合は別タブ表示中でも気付けるよう
+   *      `showInformationMessage` でトースト通知も出す。
+   *   4. 自動 open しても panel を作れない (state 不在等) 極端ケースは
+   *      `showQuickPick` の native UI に fallback して回答できるようにする。
+   */
   pushPermissionRequest(
     sessionId: string,
     req: PermissionRequestPayload,
   ): void {
-    const panel = this.panels.get(sessionId);
-    if (!panel) return;
+    let panel = this.panels.get(sessionId);
+
+    // panel が無ければ自動 open フォールバック。
+    if (!panel) {
+      this.open(sessionId);
+      panel = this.panels.get(sessionId);
+    }
+
+    // それでも開けない場合は AskUserQuestion なら native UI で回答。
+    if (!panel) {
+      if (req.toolName === "AskUserQuestion") {
+        void this.handleAskViaQuickPick(sessionId, req);
+      }
+      return;
+    }
+
+    panel.reveal();
     panel.pushPermissionRequest(req);
+
+    if (req.toolName === "AskUserQuestion") {
+      const targetPanel = panel;
+      void vscode.window
+        .showInformationMessage(
+          `Claude が質問しています: ${req.title ?? "回答が必要です"}`,
+          "回答する",
+        )
+        .then((sel) => {
+          if (sel === "回答する") targetPanel.reveal();
+        });
+    }
+  }
+
+  /**
+   * `vscode.window.showQuickPick` を使った AskUserQuestion 用 native フォールバック UI。
+   * panel が開けない極端なケース (state 不在など) で SDK の Promise を解消するため使う。
+   *
+   * - 各 question を順に QuickPick で表示 (multi-select 対応)
+   * - 「Other (自由記述)」は showInputBox で文字列受け取り
+   * - 全問回答できたら `{ behavior: "allow", updatedInput: { ...input, answers, annotations } }`
+   * - 途中でキャンセルされたら `{ behavior: "deny", message, interrupt: false }`
+   *
+   * SDK の AskUserQuestion 仕様に合わせ、`answers` は `Record<question, label>` で
+   * 多重選択時はカンマ連結、自由記述は `annotations[question].notes` に格納する。
+   */
+  private async handleAskViaQuickPick(
+    sessionId: string,
+    req: PermissionRequestPayload,
+  ): Promise<void> {
+    interface AskQuestion {
+      question: string;
+      header?: string;
+      options: Array<{ label: string; description?: string }>;
+      multiSelect?: boolean;
+    }
+    const input = req.input as { questions?: AskQuestion[] } | undefined;
+    const questions = Array.isArray(input?.questions) ? input!.questions! : [];
+    if (questions.length === 0) {
+      this.actions.onPermissionResponse?.(sessionId, req.requestId, {
+        behavior: "deny",
+        message: "AskUserQuestion: 質問が空でした",
+        interrupt: false,
+      });
+      return;
+    }
+
+    const OTHER = "Other (自由記述)";
+    const answers: Record<string, string> = {};
+    const annotations: Record<string, { notes: string }> = {};
+
+    for (const q of questions) {
+      const items: vscode.QuickPickItem[] = [
+        ...q.options.map((o) => ({
+          label: o.label,
+          description: o.description,
+        })),
+        { label: OTHER, description: "自由記述で回答する" },
+      ];
+      const placeHolder = q.header
+        ? `${q.header} — ${q.question}`
+        : q.question;
+      const picked = await vscode.window.showQuickPick(items, {
+        canPickMany: !!q.multiSelect,
+        title: q.question,
+        placeHolder,
+        ignoreFocusOut: true,
+      });
+      if (!picked) {
+        // キャンセル → SDK 側に deny を返して promise を解消
+        this.actions.onPermissionResponse?.(sessionId, req.requestId, {
+          behavior: "deny",
+          message: "ユーザーが回答をキャンセルしました",
+          interrupt: false,
+        });
+        return;
+      }
+      const pickedArr = Array.isArray(picked) ? picked : [picked];
+      const labels: string[] = [];
+      for (const p of pickedArr) {
+        if (p.label === OTHER) {
+          const text = await vscode.window.showInputBox({
+            title: q.question,
+            prompt: "自由記述で回答してください",
+            ignoreFocusOut: true,
+          });
+          if (text === undefined) {
+            this.actions.onPermissionResponse?.(sessionId, req.requestId, {
+              behavior: "deny",
+              message: "ユーザーが回答をキャンセルしました",
+              interrupt: false,
+            });
+            return;
+          }
+          labels.push(text);
+          annotations[q.question] = { notes: text };
+        } else {
+          labels.push(p.label);
+        }
+      }
+      answers[q.question] = labels.join(",");
+    }
+
+    this.actions.onPermissionResponse?.(sessionId, req.requestId, {
+      behavior: "allow",
+      updatedInput: {
+        ...(req.input as Record<string, unknown>),
+        answers,
+        annotations,
+      },
+    });
   }
 
   /**

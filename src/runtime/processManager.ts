@@ -17,6 +17,11 @@ export type { Attachment, PermissionRequestPayload } from "./claudeProcess";
 export interface SpawnOptions {
   permissionMode?: PermissionMode;
   pathToClaudeCodeExecutable?: string;
+  /**
+   * `ClaudeProcess` 内のデバッグログ (例: canUseTool 発火) を OutputChannel に
+   * 流すための optional logger。`extension.ts` の OutputChannel をそのまま渡す。
+   */
+  logger?: (msg: string) => void;
 }
 
 export interface CreateResult {
@@ -60,6 +65,7 @@ export class ProcessManager extends EventEmitter {
       cwd,
       permissionMode: opts?.permissionMode,
       pathToClaudeCodeExecutable: opts?.pathToClaudeCodeExecutable,
+      logger: opts?.logger,
     });
     this.wire(pendingId, proc);
     this.map.set(pendingId, proc);
@@ -76,6 +82,7 @@ export class ProcessManager extends EventEmitter {
       resumeSessionId: sessionId,
       permissionMode: opts?.permissionMode,
       pathToClaudeCodeExecutable: opts?.pathToClaudeCodeExecutable,
+      logger: opts?.logger,
     });
     this.wire(sessionId, proc);
     this.map.set(sessionId, proc);
@@ -92,6 +99,11 @@ export class ProcessManager extends EventEmitter {
   /** SDK の supportedCommands() を委譲。プロセス無いと空配列。 */
   async getSupportedCommands(id: string): Promise<SlashCommand[]> {
     return (await this.map.get(id)?.getSupportedCommands()) ?? [];
+  }
+
+  /** SDK の getContextUsage() を委譲。プロセス無い場合は undefined。 */
+  async getContextUsage(id: string): Promise<unknown | undefined> {
+    return await this.map.get(id)?.getContextUsage();
   }
 
   /** webview からの承認回答を該当 process に届ける。 */

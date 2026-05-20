@@ -119,6 +119,9 @@ export function activate(context: vscode.ExtensionContext): void {
   updateTreeBadge();
 
   const processManager = new ProcessManager();
+  // ClaudeProcess 内のデバッグ (canUseTool 発火等) を OutputChannel へ流す。
+  // AskUserQuestion の skip 調査が主目的。3 箇所の create/resume 呼び出しで共有。
+  const procLogger = (msg: string): void => output.appendLine(msg);
   const managedStore = new ManagedSessionStore(context.globalState);
 
   // Restore previously-managed sessions as suspended on activate.
@@ -184,6 +187,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const { id: newId } = processManager.create(state.cwd, {
         permissionMode: startMode,
         pathToClaudeCodeExecutable: claudePath,
+        logger: procLogger,
       });
       registry.registerManaged({ sessionId: newId, cwd: state.cwd });
       sessionModes.set(newId, startMode);
@@ -199,6 +203,7 @@ export function activate(context: vscode.ExtensionContext): void {
     processManager.resume(sessionId, state.cwd, {
       permissionMode: startMode,
       pathToClaudeCodeExecutable: claudePath,
+      logger: procLogger,
     });
     registry.markAsManaged(sessionId);
     registry.markSuspended(sessionId, false);
@@ -268,8 +273,17 @@ export function activate(context: vscode.ExtensionContext): void {
   // SDK の canUseTool callback で発生した承認依頼を webview へ転送
   processManager.on("permissionRequest", (id, req) => {
     output.appendLine(
-      `[ccmgr] permission request sid=${id.slice(0, 8)} tool=${req.toolName} reqId=${req.requestId.slice(0, 8)}`,
+      `[ccmgr] permission request sid=${id.slice(0, 8)} tool=${req.toolName} reqId=${req.requestId.slice(0, 8)} title=${JSON.stringify(req.title ?? null)}`,
     );
+    // AskUserQuestion は input.questions[] の件数まで出す。これで「UI に届く
+    // 前に SDK 側で消えた」のか「届いたが panel が無くて drop した」のかを
+    // 切り分けやすくなる。
+    if (req.toolName === "AskUserQuestion") {
+      const qs = (req.input as { questions?: unknown })?.questions;
+      output.appendLine(
+        `  AskUserQuestion: ${Array.isArray(qs) ? qs.length : 0} question(s)`,
+      );
+    }
     panelManager.pushPermissionRequest(id, req);
   });
 
@@ -402,6 +416,24 @@ export function activate(context: vscode.ExtensionContext): void {
     // 応答完了直後のタイミングなのでユーザー体感的にも自然。
     if (t === "assistant") {
       void refreshContextUsage(id);
+      // AskUserQuestion 用調査ログ: assistant が AskUserQuestion の tool_use を
+      // 投げてきたら明示的に記録する。直後に canUseTool 発火ログが続けば
+      // 期待通り。続かなければ SDK 側で auto-deny されている (= H1/H4 の証拠)。
+      const content = (msg as { message?: { content?: unknown } })?.message
+        ?.content;
+      if (Array.isArray(content)) {
+        for (const part of content as Array<{
+          type?: string;
+          name?: string;
+          id?: string;
+        }>) {
+          if (part?.type === "tool_use" && part?.name === "AskUserQuestion") {
+            output.appendLine(
+              `[ccmgr] assistant emitted AskUserQuestion tool_use id=${(part.id ?? "").slice(0, 8)} sid=${id.slice(0, 8)} -- expecting canUseTool callback`,
+            );
+          }
+        }
+      }
     }
 
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
@@ -562,6 +594,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const { id } = processManager.create(cwd, {
           permissionMode: startMode,
           pathToClaudeCodeExecutable: claudePath,
+          logger: procLogger,
         });
         registry.registerManaged({ sessionId: id, cwd });
         sessionModes.set(id, startMode);

@@ -141,6 +141,9 @@ window.addEventListener("message", (event) => {
     }
     if (slashState.active) renderSlashDropdown();
   } else if (msg.type === "permission") {
+    // AskUserQuestion がスキップされる事象の調査用。Help > Toggle Developer
+    // Tools on the Webview で開く DevTools コンソールに出る。
+    console.log("[ccmgr-webview] permission received", msg.request?.toolName, msg.request);
     renderPermissionRequest(msg.request);
   } else if (msg.type === "contextWindow") {
     applyContextWindow(msg.payload);
