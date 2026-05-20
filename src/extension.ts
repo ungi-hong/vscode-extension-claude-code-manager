@@ -3,6 +3,7 @@ import type { PermissionMode, SDKMessage } from "@anthropic-ai/claude-agent-sdk"
 import { FolderStore } from "./folders/store";
 import { ManagedSessionStore } from "./runtime/persistence";
 import { ProcessManager } from "./runtime/processManager";
+import { StatuslineMonitor } from "./runtime/statuslineMonitor";
 import { ForgottenStore } from "./sessions/forgottenStore";
 import { HiddenStore } from "./sessions/hiddenStore";
 import {
@@ -338,6 +339,42 @@ export function activate(context: vscode.ExtensionContext): void {
     })();
   };
 
+  // SDK 公式 API `Query.getContextUsage()` を使ったコンテキスト使用率の取得。
+  //   - `result` メッセージは stream 全体が閉じる時にしか来ないので対話中は届かない
+  //     (実測で確認済み)。なので `assistant` メッセージ到着のタイミングで
+  //     getContextUsage() を呼び、現在の使用率を取り直す。
+  //   - レスポンスの `percentage` は SDK が内部で計算した値で、deferred tools や
+  //     autocompact buffer も含む正確な値。`apiKeySource=none` でも動く。
+  //   - 同一 session で同時に in-flight しないよう、簡易な lock を入れる。
+  const contextUsageInFlight = new Set<string>();
+  const refreshContextUsage = async (id: string): Promise<void> => {
+    if (contextUsageInFlight.has(id)) return;
+    contextUsageInFlight.add(id);
+    try {
+      const res = (await processManager.getContextUsage(id)) as
+        | { percentage?: number; totalTokens?: number; maxTokens?: number }
+        | undefined;
+      if (!res || typeof res.percentage !== "number") return;
+      const usedPct = Math.max(0, Math.min(100, Math.round(res.percentage)));
+      const remainingPct = 100 - usedPct;
+      if (panelManager.hasPanel(id)) {
+        panelManager.pushContextWindow(id, {
+          usedPercentage: usedPct,
+          remainingPercentage: remainingPct,
+        });
+      }
+      output.appendLine(
+        `[ctx] sid=${id.slice(0, 8)} used=${usedPct}% (${res.totalTokens ?? "?"}/${res.maxTokens ?? "?"})`,
+      );
+    } catch (err) {
+      output.appendLine(
+        `[ctx] getContextUsage failed sid=${id.slice(0, 8)}: ${(err as Error).message}`,
+      );
+    } finally {
+      contextUsageInFlight.delete(id);
+    }
+  };
+
   processManager.on("message", (id, msg) => {
     panelManager.pushSdkMessage(id, msg);
     // デバッグ: 来てる SDKMessage の type を全部記録 (rate_limit_event の到来確認用)
@@ -356,6 +393,15 @@ export function activate(context: vscode.ExtensionContext): void {
         `  init: apiKeySource=${s.apiKeySource} model=${s.model} ver=${s.claude_code_version}`,
       );
       pushCommandsToPanel(id, true);
+      // init 直後にも一度コンテキスト使用率を取って、新規セッションでも
+      // ヘッダーバーが出るようにする (system prompt や tools 由来の初期トークン分)。
+      void refreshContextUsage(id);
+    }
+
+    // assistant メッセージ受信時に SDK 公式の getContextUsage を呼んで更新する。
+    // 応答完了直後のタイミングなのでユーザー体感的にも自然。
+    if (t === "assistant") {
+      void refreshContextUsage(id);
     }
 
     // 軽い snapshot 更新: 直近 user/assistant プレビューを永続化
@@ -375,6 +421,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     sessionModes.delete(id);
     sdkCommandsCache.delete(id);
+    contextUsageInFlight.delete(id);
     panelManager.pushStatus(id, "セッションが終了しました", "info");
   });
   processManager.on("error", (id, err) => {
@@ -387,6 +434,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const statusBar = new StatusBar(registry);
 
+  // statusline JSON 監視: Claude Code 本体が `~/.claude/ccmgr-statusline.sh` 経由で
+  // `/tmp/claude-statusline-input.json` を書き換えるので context_window を
+  // session_id が一致する SessionPanel のヘッダーバーへ流す。
+  // rate_limits は SDK 経由 (apiKeySource=none) では取れないことが調査済みなので
+  // 非表示方針。statusline JSON 自体は CLI 対話モード時のみ更新される。
+  const statuslineMonitor = new StatuslineMonitor();
+  statuslineMonitor.on("update", (payload) => {
+    if (!payload.contextWindow) return;
+    if (panelManager.hasPanel(payload.sessionId)) {
+      panelManager.pushContextWindow(payload.sessionId, payload.contextWindow);
+    }
+  });
+  statuslineMonitor.start();
+
   context.subscriptions.push(
     output,
     treeView,
@@ -395,6 +456,7 @@ export function activate(context: vscode.ExtensionContext): void {
     forgottenStore,
     titleStore,
     statusBar,
+    { dispose: () => statuslineMonitor.dispose() },
     vscode.commands.registerCommand(
       "claudeCodeManager.openSession",
       (target: unknown) => {

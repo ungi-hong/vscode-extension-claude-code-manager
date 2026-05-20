@@ -198,6 +198,29 @@ export class ClaudeProcess extends EventEmitter {
     return (await this.currentQuery?.supportedCommands()) ?? [];
   }
 
+  /**
+   * SDK 公式の context usage 取得。SDKControlGetContextUsageResponse 型が返るが、
+   * 必要なのは `percentage` (使用率), `totalTokens`, `maxTokens` だけなので
+   * 呼び出し側でフィールド単位に取り出す前提。
+   *
+   * SDK の Query.getContextUsage() は内部で control request を投げて
+   * `claude` プロセスから返信を受け取る。`apiKeySource` は関係ないので
+   * SDK 経由 (apiKeySource=none) でも問題なく動く。
+   *
+   * プロセスが死んでる/まだ initialize していない場合は undefined。
+   */
+  async getContextUsage(): Promise<unknown | undefined> {
+    const q = this.currentQuery as unknown as {
+      getContextUsage?: () => Promise<unknown>;
+    } | undefined;
+    if (!q?.getContextUsage) return undefined;
+    try {
+      return await q.getContextUsage();
+    } catch {
+      return undefined;
+    }
+  }
+
   send(text: string, attachments?: Attachment[]): boolean {
     if (this.done) return false;
     let content: SDKUserMessage["message"]["content"];

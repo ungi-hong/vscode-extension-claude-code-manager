@@ -33,6 +33,9 @@ const searchCount = document.getElementById("search-count") as HTMLElement;
 const searchPrev = document.getElementById("search-prev") as HTMLButtonElement;
 const searchNext = document.getElementById("search-next") as HTMLButtonElement;
 const searchClose = document.getElementById("search-close") as HTMLButtonElement;
+const ctxWindowEl = document.getElementById("ctx-window") as HTMLElement | null;
+const ctxWindowFill = document.getElementById("ctx-window-fill") as HTMLElement | null;
+const ctxWindowPct = document.getElementById("ctx-window-pct") as HTMLElement | null;
 
 type PermissionMode =
   | "default"
@@ -139,8 +142,36 @@ window.addEventListener("message", (event) => {
     if (slashState.active) renderSlashDropdown();
   } else if (msg.type === "permission") {
     renderPermissionRequest(msg.request);
+  } else if (msg.type === "contextWindow") {
+    applyContextWindow(msg.payload);
   }
 });
+
+/**
+ * statusline JSON 由来のコンテキストウィンドウ残量をヘッダーバーに反映。
+ *   - fill 幅 = remainingPercentage (残量を可視化)
+ *   - 色レベルは used で判定 (used 多 = 赤)
+ */
+function applyContextWindow(payload: {
+  usedPercentage: number;
+  remainingPercentage: number;
+}): void {
+  if (!ctxWindowEl || !ctxWindowFill || !ctxWindowPct) return;
+  if (
+    !payload ||
+    typeof payload.remainingPercentage !== "number" ||
+    typeof payload.usedPercentage !== "number"
+  ) {
+    return;
+  }
+  const used = Math.max(0, Math.min(100, payload.usedPercentage));
+  const remaining = Math.max(0, Math.min(100, payload.remainingPercentage));
+  ctxWindowEl.hidden = false;
+  ctxWindowFill.style.width = remaining + "%";
+  ctxWindowPct.textContent = "残り " + remaining + "%";
+  const level = used >= 80 ? "danger" : used >= 50 ? "warn" : "";
+  ctxWindowFill.dataset.level = level;
+}
 
 btnSubmit.addEventListener("click", submitInput);
 btnStop.addEventListener("click", interruptGeneration);

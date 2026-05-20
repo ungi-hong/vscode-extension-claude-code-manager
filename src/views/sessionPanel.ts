@@ -14,6 +14,12 @@ import { JsonlBuffer, toSessionEvent } from "../sessions/parser";
 import { makeNonce } from "../utils/nonce";
 import { sessionJsonlPath } from "../utils/projectsPath";
 
+/** SessionPanel ヘッダーに表示するコンテキストウィンドウ残量データ。 */
+export interface ContextWindowPayload {
+  usedPercentage: number;
+  remainingPercentage: number;
+}
+
 /** Webview に流す slash command 1 件分。SDK 由来 + ユーザー定義 + プラグインの合成型。 */
 export interface PanelSlashCommand {
   name: string;
@@ -145,6 +151,21 @@ export class SessionPanelManager {
     if (!panel) return;
     panel.pushPermissionRequest(req);
   }
+
+  /**
+   * statusline JSON 由来のコンテキストウィンドウ残量をパネルヘッダーへ流す。
+   * panel が無い (該当 session が開かれていない) 場合は黙って drop する。
+   */
+  pushContextWindow(sessionId: string, ctx: ContextWindowPayload): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.pushContextWindow(ctx);
+  }
+
+  /** 該当 session の panel を開いているかどうか (extension.ts のルーティング判定用)。 */
+  hasPanel(sessionId: string): boolean {
+    return this.panels.has(sessionId);
+  }
 }
 
 class SessionPanel {
@@ -264,6 +285,10 @@ class SessionPanel {
 
   pushPermissionRequest(req: PermissionRequestPayload): void {
     this.panel.webview.postMessage({ type: "permission", request: req });
+  }
+
+  pushContextWindow(ctx: ContextWindowPayload): void {
+    this.panel.webview.postMessage({ type: "contextWindow", payload: ctx });
   }
 
   private async replayJsonl(state: SessionState): Promise<void> {
@@ -415,6 +440,13 @@ class SessionPanel {
       <span class="branch" id="title-branch"></span>
       <span class="session-id" id="title-session"></span>
       <span class="origin-badge" id="origin-badge"></span>
+    </div>
+    <!-- statusline JSON 由来のコンテキストウィンドウ残量バー。
+         初期は hidden、初回 contextWindow メッセージで visible 化。 -->
+    <div class="ctx-window" id="ctx-window" hidden>
+      <span class="ctx-window-label">Context</span>
+      <div class="ctx-window-bar"><div class="ctx-window-fill" id="ctx-window-fill"></div></div>
+      <span class="ctx-window-pct" id="ctx-window-pct">--%</span>
     </div>
   </header>
   <!-- Cmd/Ctrl+F で表示される検索バー -->
