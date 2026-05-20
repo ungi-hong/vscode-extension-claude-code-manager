@@ -11,6 +11,7 @@ import type {
 import { SessionRegistry } from "../sessions/registry";
 import { SessionEvent, SessionState } from "../sessions/types";
 import { JsonlBuffer, toSessionEvent } from "../sessions/parser";
+import { makeNonce } from "../utils/nonce";
 import { sessionJsonlPath } from "../utils/projectsPath";
 
 /** Webview に流す slash command 1 件分。SDK 由来 + ユーザー定義 + プラグインの合成型。 */
@@ -472,11 +473,3 @@ const serializeEvent = (evt: SessionEvent): unknown => {
   };
 };
 
-const makeNonce = (): string => {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let out = "";
-  for (let i = 0; i < 32; i += 1)
-    out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-};
