@@ -3,6 +3,7 @@ import type { PermissionMode, SDKMessage } from "@anthropic-ai/claude-agent-sdk"
 import { FolderStore } from "./folders/store";
 import { ManagedSessionStore } from "./runtime/persistence";
 import { ProcessManager } from "./runtime/processManager";
+import { ForgottenStore } from "./sessions/forgottenStore";
 import { HiddenStore } from "./sessions/hiddenStore";
 import {
   extractAssistantSummary,
@@ -86,16 +87,22 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   const hiddenStore = new HiddenStore(context.globalState);
+  const forgottenStore = new ForgottenStore(context.globalState);
   const folders = new FolderStore(context.globalState);
   const titleStore = new TitleStore(context.globalState);
 
   watcher.on("event", (evt) => {
+    // 永続削除されたセッションは jsonl 更新を一切無視する。registry に載せない
+    // ことでメモリ消費を抑えるとともに、TreeProvider 側のフィルタに依存せず
+    // 復活されない保証を最上流で担保する。
+    if (forgottenStore.has(evt.sessionId)) return;
     registry.ingest(evt);
   });
 
   const treeProvider = new SessionsTreeProvider(
     registry,
     hiddenStore,
+    forgottenStore,
     folders,
     titleStore,
   );
@@ -117,6 +124,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // 古い session でも `~/.claude/projects/.../<sid>.jsonl` が残ってれば
   // panel 復元時に replay できるよう、ここで filePath を解決して registry に渡す。
   for (const snap of managedStore.list()) {
+    // 永続削除されたセッションは managed として記録されていても復元しない。
+    // (Remove 時に managedStore.remove() するので通常はここに来ないが、
+    //  二重防御として forgottenStore も見ておく)
+    if (forgottenStore.has(snap.sessionId)) continue;
     const candidate = sessionJsonlPath(snap.cwd, snap.sessionId);
     let filePath: string | undefined;
     try {
@@ -381,6 +392,7 @@ export function activate(context: vscode.ExtensionContext): void {
     treeView,
     treeProvider,
     hiddenStore,
+    forgottenStore,
     titleStore,
     statusBar,
     vscode.commands.registerCommand(
@@ -549,46 +561,175 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           return;
         }
-        const items = ids.map<vscode.QuickPickItem & { sessionId: string }>(
-          (sessionId) => {
-            const state = registry.get(sessionId);
-            const project = state?.projectName ?? "(unknown project)";
-            const branch = state?.gitBranch ? ` (${state.gitBranch})` : "";
-            return {
-              sessionId,
-              label: `$(eye) ${project}${branch}`,
-              description: sessionId.slice(0, 8),
-              detail: state?.lastAssistantText ?? state?.lastUserPrompt ?? "",
-            };
-          },
-        );
+        // 各項目の右側に表示する「ゴミ箱ボタン」。クリックすると永続削除へ昇格する。
+        const trashButton: vscode.QuickInputButton = {
+          iconPath: new vscode.ThemeIcon("trash"),
+          tooltip: "Remove permanently (Show Removed Sessions... から復元可能)",
+        };
+        type Item = vscode.QuickPickItem & {
+          sessionId: string;
+          buttons?: vscode.QuickInputButton[];
+        };
+        const items: Item[] = ids.map((sessionId) => {
+          const state = registry.get(sessionId);
+          const project = state?.projectName ?? "(unknown project)";
+          const branch = state?.gitBranch ? ` (${state.gitBranch})` : "";
+          return {
+            sessionId,
+            label: `$(eye) ${project}${branch}`,
+            description: sessionId.slice(0, 8),
+            detail: state?.lastAssistantText ?? state?.lastUserPrompt ?? "",
+            buttons: [trashButton],
+          };
+        });
         items.push({
           sessionId: "__clear_all__",
           label: "$(clear-all) Clear All Hidden",
           description: `${ids.length} sessions`,
         });
+
+        // showQuickPick は item buttons をサポートしないので createQuickPick で構築する。
+        // ボタンクリック (= remove) と enter (= restore) を別ハンドラで処理。
+        await new Promise<void>((resolve) => {
+          const qp = vscode.window.createQuickPick<Item>();
+          qp.title = "Hidden Sessions — Enter で復元 / ゴミ箱で永続削除";
+          qp.placeholder = "復元するセッションを選択 (各項目のゴミ箱で永続削除)";
+          qp.canSelectMany = false;
+          qp.items = items;
+          qp.onDidTriggerItemButton(async (e) => {
+            const item = e.item;
+            if (item.sessionId === "__clear_all__") return;
+            qp.hide();
+            await removeSessionPermanently(item.sessionId);
+            resolve();
+          });
+          qp.onDidAccept(async () => {
+            const picked = qp.selectedItems[0];
+            qp.hide();
+            if (!picked) {
+              resolve();
+              return;
+            }
+            if (picked.sessionId === "__clear_all__") {
+              await hiddenStore.clear();
+              vscode.window.setStatusBarMessage(
+                "All hidden sessions restored",
+                3000,
+              );
+            } else {
+              await hiddenStore.remove(picked.sessionId);
+              vscode.window.setStatusBarMessage(
+                `Restored ${picked.sessionId.slice(0, 8)}`,
+                3000,
+              );
+            }
+            resolve();
+          });
+          qp.onDidHide(() => {
+            qp.dispose();
+            resolve();
+          });
+          qp.show();
+        });
+      },
+    ),
+    vscode.commands.registerCommand(
+      "claudeCodeManager.removeSession",
+      async (target: unknown) => {
+        const sessionId = resolveSessionId(target);
+        if (!sessionId) return;
+        await removeSessionPermanently(sessionId);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "claudeCodeManager.showForgottenSessions",
+      async () => {
+        const ids = forgottenStore.list();
+        if (ids.length === 0) {
+          vscode.window.showInformationMessage(
+            "Claude Code Manager: 永続削除されたセッションはありません",
+          );
+          return;
+        }
+        // forgotten セッションは registry に載っていないため、preview / project 名は
+        // 取れない (= sessionId 先頭 8 文字でしか識別できない)。これは仕様。
+        // jsonl からメタ情報を再読み込みする手も理論上はあるが、「永続削除」の
+        // 意味からして load しない方がメモリ・I/O ともに健全。
+        type Item = vscode.QuickPickItem & { sessionId: string };
+        const items: Item[] = ids.map((sessionId) => ({
+          sessionId,
+          label: `$(trash) ${sessionId.slice(0, 8)}`,
+          description: "永続削除済み",
+        }));
+        items.push({
+          sessionId: "__clear_all__",
+          label: "$(clear-all) Restore All Removed",
+          description: `${ids.length} sessions`,
+        });
         const picked = await vscode.window.showQuickPick(items, {
-          title: "Hidden Sessions — 選択して復元",
-          placeHolder: "復元するセッションを選択",
+          title: "Removed Sessions — 選択して復活",
+          placeHolder: "復活させるセッションを選択",
           canPickMany: false,
         });
         if (!picked) return;
         if (picked.sessionId === "__clear_all__") {
-          await hiddenStore.clear();
+          await forgottenStore.clear();
           vscode.window.setStatusBarMessage(
-            "All hidden sessions restored",
-            3000,
+            "All removed sessions restored (jsonl 更新時に再表示されます)",
+            5000,
           );
         } else {
-          await hiddenStore.remove(picked.sessionId);
+          await forgottenStore.remove(picked.sessionId);
           vscode.window.setStatusBarMessage(
-            `Restored ${picked.sessionId.slice(0, 8)}`,
-            3000,
+            `Restored ${picked.sessionId.slice(0, 8)} (jsonl 更新時に再表示されます)`,
+            5000,
           );
         }
       },
     ),
   );
+
+  /**
+   * セッションを「永続削除」する。確認ダイアログを出し、OK なら:
+   *   1. forgottenStore に追加 (= watcher の event を以後破棄)
+   *   2. hiddenStore からは消す (重複保持を防ぐ)
+   *   3. managed なら process を止めて managedStore からも消す
+   *   4. panel が開いていれば閉じる
+   *   5. registry からも消す
+   *
+   * 結果: VSCode を再起動しても、jsonl が更新されても二度と表示されない。
+   * 復活させたい場合は `Show Removed Sessions...` から行う。
+   */
+  async function removeSessionPermanently(sessionId: string): Promise<void> {
+    const state = registry.get(sessionId);
+    const project = state?.projectName ?? sessionId.slice(0, 8);
+    const confirm = await vscode.window.showWarningMessage(
+      `セッション ${project} (${sessionId.slice(0, 8)}) を永続的に削除しますか?\n\n` +
+        `・ サイドバーに二度と表示されません (VSCode 再起動後も)\n` +
+        `・ jsonl 履歴自体はディスクに残ります\n` +
+        `・ 復活は "Show Removed Sessions..." から可能です`,
+      { modal: true },
+      "削除",
+    );
+    if (confirm !== "削除") return;
+
+    await forgottenStore.add(sessionId);
+    // hiddenStore に入っていれば取り除く (forgotten が優先で重複保持の意味がない)
+    if (hiddenStore.has(sessionId)) {
+      await hiddenStore.remove(sessionId);
+    }
+    // managed セッションなら関連リソースを後片付け
+    if (processManager.has(sessionId)) {
+      await processManager.dispose(sessionId);
+    }
+    await managedStore.remove(sessionId);
+    panelManager.disposePanel(sessionId);
+    registry.removeSession(sessionId);
+    vscode.window.setStatusBarMessage(
+      `Removed ${sessionId.slice(0, 8)} permanently`,
+      3000,
+    );
+  }
 
   registry.start();
   watcher.start();

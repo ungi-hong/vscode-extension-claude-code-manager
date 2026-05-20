@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { FolderEntry, FolderStore, labelOf } from "../folders/store";
+import { ForgottenStore } from "../sessions/forgottenStore";
 import { HiddenStore } from "../sessions/hiddenStore";
 import { SessionRegistry } from "../sessions/registry";
 import { TitleStore } from "../sessions/titleStore";
@@ -83,6 +84,7 @@ export class SessionsTreeProvider
   constructor(
     private registry: SessionRegistry,
     private hiddenStore: HiddenStore,
+    private forgottenStore: ForgottenStore,
     private folders: FolderStore,
     private titleStore: TitleStore,
   ) {
@@ -90,6 +92,9 @@ export class SessionsTreeProvider
     registry.on("removed", () => this._onDidChangeTreeData.fire(undefined));
     registry.on("snapshot", () => this._onDidChangeTreeData.fire(undefined));
     hiddenStore.on("changed", () =>
+      this._onDidChangeTreeData.fire(undefined),
+    );
+    forgottenStore.on("changed", () =>
       this._onDidChangeTreeData.fire(undefined),
     );
     folders.on("changed", () => this._onDidChangeTreeData.fire(undefined));
@@ -120,6 +125,10 @@ export class SessionsTreeProvider
       const sessionsByCwd = new Map<string, SessionState[]>();
       for (const s of this.registry.list()) {
         if (this.hiddenStore.has(s.sessionId)) continue;
+        // Removed (永続削除) も非表示。通常 watcher 段階で破棄されるため
+        // registry に載らないはずだが、managedStore 由来の registerManaged
+        // など他経路で入ってくる可能性に備えて二重に防御する。
+        if (this.forgottenStore.has(s.sessionId)) continue;
         const arr = sessionsByCwd.get(s.cwd) ?? [];
         arr.push(s);
         sessionsByCwd.set(s.cwd, arr);

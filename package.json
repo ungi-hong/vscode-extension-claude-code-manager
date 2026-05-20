@@ -65,6 +65,18 @@
         "icon": "$(eye)"
       },
       {
+        "command": "claudeCodeManager.removeSession",
+        "title": "Remove from Sidebar (Permanent)...",
+        "category": "Claude Code Manager",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeCodeManager.showForgottenSessions",
+        "title": "Show Removed Sessions...",
+        "category": "Claude Code Manager",
+        "icon": "$(history)"
+      },
+      {
         "command": "claudeCodeManager.focusSidebar",
         "title": "Focus Claude Code Manager Sidebar",
         "category": "Claude Code Manager"
@@ -134,6 +146,11 @@
           "command": "claudeCodeManager.showHiddenSessions",
           "when": "view == ccmgr.sessions",
           "group": "navigation@3"
+        },
+        {
+          "command": "claudeCodeManager.showForgottenSessions",
+          "when": "view == ccmgr.sessions",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -170,7 +187,12 @@
         {
           "command": "claudeCodeManager.hideSession",
           "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
-          "group": "8_archive"
+          "group": "8_archive@1"
+        },
+        {
+          "command": "claudeCodeManager.removeSession",
+          "when": "view == ccmgr.sessions && viewItem =~ /^session\\./",
+          "group": "8_archive@2"
         },
         {
           "command": "claudeCodeManager.copySessionId",
