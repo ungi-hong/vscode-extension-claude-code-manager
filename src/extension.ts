@@ -13,7 +13,6 @@ import { TitleStore } from "./sessions/titleStore";
 import { SessionWatcher } from "./sessions/watcher";
 import { scanCustomCommands } from "./utils/customCommands";
 import { sessionJsonlPath } from "./utils/projectsPath";
-import { RabbitWebviewProvider } from "./views/rabbitView";
 import { SessionsTreeProvider } from "./views/treeProvider";
 import { PanelSlashCommand, SessionPanelManager } from "./views/sessionPanel";
 import { StatusBar } from "./views/statusBar";
@@ -104,11 +103,6 @@ export function activate(context: vscode.ExtensionContext): void {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
-  const rabbitProvider = new RabbitWebviewProvider(context.extensionUri);
-  const rabbitRegistration = vscode.window.registerWebviewViewProvider(
-    RabbitWebviewProvider.viewType,
-    rabbitProvider,
-  );
   const updateTreeBadge = () => {
     const n = hiddenStore.size();
     treeView.description = n > 0 ? `${n} hidden` : undefined;
@@ -388,8 +382,6 @@ export function activate(context: vscode.ExtensionContext): void {
     treeProvider,
     hiddenStore,
     titleStore,
-    rabbitRegistration,
-    rabbitProvider,
     statusBar,
     vscode.commands.registerCommand(
       "claudeCodeManager.openSession",
