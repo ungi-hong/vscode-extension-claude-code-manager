@@ -21,6 +21,7 @@ import { StatusBar } from "./views/statusBar";
 
 import { statSync } from "fs";
 import { execSync } from "child_process";
+import * as path from "path";
 
 /** Shift+Tab で循環するモード (bypassPermissions は危険なので含めない)。 */
 const MODE_CYCLE: PermissionMode[] = ["default", "acceptEdits", "plan"];
@@ -51,7 +52,21 @@ export function activate(context: vscode.ExtensionContext): void {
    *   1. `claudeCodeManager.claudePath` 設定が空でなければそれを使う
    *   2. `which claude` (Windows は `where claude`) でPATHから検索
    *   3. それもダメなら undefined → SDK 同梱のバイナリにフォールバック
-   *      (VSIX に同梱されてれば動く / なければエラー)
+   *
+   * Windows の難しさ:
+   *   npm でインストールされた CLI は `<npm-prefix>/` 配下に
+   *     - `claude`        (拡張子なし: mac/linux 用 sh スクリプト)
+   *     - `claude.cmd`    (Windows 用バッチラッパー)
+   *     - `claude.ps1`    (PowerShell 用)
+   *   を置くが、SDK 側は受け取ったパスを「拡張子が .js/.mjs/.ts 系でなければ
+   *   ネイティブバイナリ」と判定して Node の `child_process.spawn` で *直接*
+   *   実行する。Node の spawn は `.cmd` / `.bat` を `shell: true` なしでは
+   *   起動できないし、拡張子なしの sh は Windows では実行不能。
+   *
+   *   結果: `.cmd` を渡しても "native binary not found" になる。
+   *   対策: `<npm-prefix>/node_modules/@anthropic-ai/claude-code/bin/claude.exe`
+   *   (npm が同梱する本物のネイティブバイナリ) を直指定する。これなら
+   *   spawn が直接 launch できる。
    */
   const resolveClaudePath = (): string | undefined => {
     const override = vscode.workspace
@@ -61,8 +76,40 @@ export function activate(context: vscode.ExtensionContext): void {
     if (override) return override;
     try {
       const cmd = process.platform === "win32" ? "where claude" : "which claude";
-      const found = execSync(cmd, { encoding: "utf8" }).split(/\r?\n/)[0].trim();
-      if (found) return found;
+      const lines = execSync(cmd, { encoding: "utf8" })
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (process.platform === "win32") {
+        // 1) PATH から見つかった候補のうち、まず .exe を探す (= 既にネイティブ exe を直指定済)
+        const exeDirect = lines.find((l) => l.toLowerCase().endsWith(".exe"));
+        if (exeDirect) return exeDirect;
+        // 2) .cmd 経由でインストールされている npm CLI 構造から本物の exe を辿る
+        const cmdPath = lines.find((l) => l.toLowerCase().endsWith(".cmd"));
+        if (cmdPath) {
+          const dir = path.dirname(cmdPath);
+          const nativeExe = path.join(
+            dir,
+            "node_modules",
+            "@anthropic-ai",
+            "claude-code",
+            "bin",
+            "claude.exe",
+          );
+          try {
+            if (statSync(nativeExe).isFile()) return nativeExe;
+          } catch {
+            // fall through
+          }
+          // exe を辿れない場合、`.cmd` を渡しても SDK 側で spawn に失敗する。
+          // undefined にして SDK 同梱バイナリにフォールバックさせる。
+          output.appendLine(
+            `[ccmgr] WARN: found ${cmdPath} but could not locate native claude.exe at ${nativeExe}`,
+          );
+        }
+        return undefined;
+      }
+      if (lines[0]) return lines[0];
     } catch {
       // not in PATH
     }
