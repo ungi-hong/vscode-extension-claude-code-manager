@@ -3,6 +3,7 @@ import type { PermissionMode, SDKMessage } from "./runtime/cliTypes";
 import { FolderStore } from "./folders/store";
 import { ManagedSessionStore } from "./runtime/persistence";
 import { ProcessManager } from "./runtime/processManager";
+import { RemoteControlManager } from "./runtime/remoteControl";
 import { StatuslineMonitor } from "./runtime/statuslineMonitor";
 import { ForgottenStore } from "./sessions/forgottenStore";
 import { HiddenStore } from "./sessions/hiddenStore";
@@ -259,6 +260,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // AskUserQuestion の skip 調査が主目的。3 箇所の create/resume 呼び出しで共有。
   const procLogger = (msg: string): void => output.appendLine(msg);
   const managedStore = new ManagedSessionStore(context.globalState);
+  // 携帯/ブラウザから操作するための並走 `claude remote-control` プロセス管理。
+  // Webview セッション (headless CLI) とは別会話。
+  const remoteControl = new RemoteControlManager();
 
   // Restore previously-managed sessions as suspended on activate.
   // 古い session でも `~/.claude/projects/.../<sid>.jsonl` が残ってれば
@@ -386,6 +390,13 @@ export function activate(context: vscode.ExtensionContext): void {
       panelManager.pushMode(sessionId, cur);
       // SDK init 待たずに custom (filesystem) commands は流せる
       pushCommandsToPanel(sessionId, false);
+      // Remote Control バナーの初期状態 (off or 既存 active) を流す。
+      const rcInfo = remoteControl.getInfo(sessionId);
+      panelManager.pushRemoteControl(sessionId, {
+        status: rcInfo?.status ?? "off",
+        url: rcInfo?.url,
+        name: rcInfo?.name,
+      });
     },
     onInterrupt: (sessionId) => {
       void (async () => {
@@ -405,6 +416,111 @@ export function activate(context: vscode.ExtensionContext): void {
         `[ccmgr] permission ${result.behavior} reqId=${requestId.slice(0, 8)} delivered=${ok}`,
       );
     },
+    onToggleRemoteControl: (sessionId) => {
+      toggleRemoteControl(sessionId);
+    },
+    onOpenExternalUrl: (url) => {
+      // Webview 内 a 要素は CSP で外部へ遷移できないので、ここで openExternal を呼ぶ。
+      // remote-control 系以外の任意 URL が来ても困るので、claude.ai / claude.com 限定。
+      if (!/^https:\/\/[a-z0-9.-]*claude\.(ai|com)\//i.test(url)) {
+        output.appendLine(`[ccmgr] openExternal rejected (non-claude host): ${url}`);
+        return;
+      }
+      void vscode.env.openExternal(vscode.Uri.parse(url));
+    },
+  });
+
+  /**
+   * Remote Control 並走モードの起動/停止トグル。
+   *
+   * - 起動中なら停止
+   * - 未起動なら `claude remote-control --spawn session` を子プロセスで起動
+   *
+   * Webview セッション (headless CLI) と claude.ai/code 側セッションは別会話なので
+   * 履歴は同期しない。携帯から続きを書きたい時の「逃げ道」として使う。
+   */
+  const toggleRemoteControl = (sessionId: string): void => {
+    if (remoteControl.isActive(sessionId)) {
+      output.appendLine(`[rc] stop requested sid=${sessionId.slice(0, 8)}`);
+      remoteControl.stop(sessionId);
+      return;
+    }
+    if (!ensureClaudePathOrPrompt()) return;
+    const state = registry.get(sessionId);
+    if (!state) {
+      vscode.window.showWarningMessage(
+        "Claude Code Manager: セッションが見つかりません",
+      );
+      return;
+    }
+    const name = `${state.projectName} · remote`;
+    try {
+      const info = remoteControl.start(sessionId, {
+        pathToClaudeCodeExecutable: claudePath!,
+        cwd: state.cwd,
+        name,
+        logger: procLogger,
+      });
+      panelManager.pushRemoteControl(sessionId, {
+        status: info.status,
+        url: info.url,
+        name: info.name,
+      });
+      panelManager.pushStatus(
+        sessionId,
+        "Remote Control を起動中… URL 取得まで数秒お待ちください",
+        "info",
+      );
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      panelManager.pushStatus(
+        sessionId,
+        `Remote Control 起動失敗: ${e.message}`,
+        "error",
+      );
+    }
+  };
+
+  remoteControl.on("started", (info) => {
+    output.appendLine(
+      `[rc] active sid=${info.sessionId.slice(0, 8)} url=${info.url ?? "?"}`,
+    );
+    panelManager.pushRemoteControl(info.sessionId, {
+      status: "active",
+      url: info.url,
+      name: info.name,
+    });
+    if (info.url) {
+      void vscode.window
+        .showInformationMessage(
+          `Remote Control を起動しました: ${info.url}`,
+          "ブラウザで開く",
+          "URL をコピー",
+        )
+        .then((sel) => {
+          if (sel === "ブラウザで開く") {
+            void vscode.env.openExternal(vscode.Uri.parse(info.url!));
+          } else if (sel === "URL をコピー") {
+            void vscode.env.clipboard.writeText(info.url!);
+          }
+        });
+    }
+  });
+  remoteControl.on("stopped", (sessionId) => {
+    output.appendLine(`[rc] stopped sid=${sessionId.slice(0, 8)}`);
+    panelManager.pushRemoteControl(sessionId, { status: "off" });
+    panelManager.pushStatus(sessionId, "Remote Control を停止しました", "info");
+  });
+  remoteControl.on("error", (sessionId, err) => {
+    output.appendLine(
+      `[rc] error sid=${sessionId.slice(0, 8)} ${err.message}`,
+    );
+    panelManager.pushRemoteControl(sessionId, { status: "off" });
+    panelManager.pushStatus(
+      sessionId,
+      `Remote Control エラー: ${err.message}`,
+      "error",
+    );
   });
 
   // SDK の canUseTool callback で発生した承認依頼を webview へ転送
@@ -770,6 +886,19 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     ),
     vscode.commands.registerCommand(
+      "claudeCodeManager.toggleRemoteControl",
+      (target: unknown) => {
+        const sessionId = resolveSessionId(target);
+        if (!sessionId) {
+          vscode.window.showWarningMessage(
+            "Claude Code Manager: セッションを指定してください",
+          );
+          return;
+        }
+        toggleRemoteControl(sessionId);
+      },
+    ),
+    vscode.commands.registerCommand(
       "claudeCodeManager.stopSession",
       async (target: unknown) => {
         const sessionId = resolveSessionId(target);
@@ -971,6 +1100,7 @@ export function activate(context: vscode.ExtensionContext): void {
     dispose: () => {
       registry.stop();
       void watcher.stop();
+      remoteControl.disposeAll();
       void processManager.disposeAll();
       folders.dispose();
     },

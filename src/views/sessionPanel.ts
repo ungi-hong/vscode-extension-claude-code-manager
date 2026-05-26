@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import type {
   PermissionMode,
   PermissionResult,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "../runtime/cliTypes";
 import type {
   Attachment,
   PermissionRequestPayload,
@@ -18,6 +18,16 @@ import { sessionJsonlPath } from "../utils/projectsPath";
 export interface ContextWindowPayload {
   usedPercentage: number;
   remainingPercentage: number;
+}
+
+/**
+ * Webview ヘッダーに出す Remote Control バナーの状態。
+ * "off" は未起動、"starting" は spawn 済みで URL 抽出待ち、"active" は URL 取得済み。
+ */
+export interface RemoteControlPayload {
+  status: "off" | "starting" | "active";
+  url?: string;
+  name?: string;
 }
 
 /** Webview に流す slash command 1 件分。SDK 由来 + ユーザー定義 + プラグインの合成型。 */
@@ -53,6 +63,13 @@ export interface PanelActions {
     requestId: string,
     result: PermissionResult,
   ) => void;
+  /**
+   * Webview の「📱 Remote」ボタンが押された時に呼ばれる。
+   * 未起動なら起動、起動中なら停止。extension 側で `RemoteControlManager` を制御する。
+   */
+  onToggleRemoteControl?: (sessionId: string) => void;
+  /** Webview から「URL を外部ブラウザで開く」リクエストが来た時に呼ばれる。 */
+  onOpenExternalUrl?: (url: string) => void;
 }
 
 export class SessionPanelManager {
@@ -299,6 +316,13 @@ export class SessionPanelManager {
     panel.pushContextWindow(ctx);
   }
 
+  /** Remote Control の状態 (off/starting/active + URL) を Webview ヘッダーに反映する。 */
+  pushRemoteControl(sessionId: string, payload: RemoteControlPayload): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) return;
+    panel.pushRemoteControl(payload);
+  }
+
   /** 該当 session の panel を開いているかどうか (extension.ts のルーティング判定用)。 */
   hasPanel(sessionId: string): boolean {
     return this.panels.has(sessionId);
@@ -428,6 +452,10 @@ class SessionPanel {
     this.panel.webview.postMessage({ type: "contextWindow", payload: ctx });
   }
 
+  pushRemoteControl(payload: RemoteControlPayload): void {
+    this.panel.webview.postMessage({ type: "remoteControl", payload });
+  }
+
   private async replayJsonl(state: SessionState): Promise<void> {
     if (!state.filePath || typeof state.filePath !== "string") return;
     let stat: fs.Stats;
@@ -503,6 +531,15 @@ class SessionPanel {
       case "interrupt":
         this.actions.onInterrupt?.(this.currentSessionId);
         break;
+      case "toggleRemoteControl":
+        this.actions.onToggleRemoteControl?.(this.currentSessionId);
+        break;
+      case "openExternal": {
+        const url = typeof msg.url === "string" ? msg.url : "";
+        if (!url) return;
+        this.actions.onOpenExternalUrl?.(url);
+        break;
+      }
       case "permissionResponse": {
         const requestId =
           typeof msg.requestId === "string" ? msg.requestId : "";
@@ -584,6 +621,14 @@ class SessionPanel {
       <span class="ctx-window-label">Context</span>
       <div class="ctx-window-bar"><div class="ctx-window-fill" id="ctx-window-fill"></div></div>
       <span class="ctx-window-pct" id="ctx-window-pct">--%</span>
+    </div>
+    <!-- Remote Control バナー: 並走モードで起動した別セッションの URL を表示。
+         クリック時の起動/停止と URL のオープン/コピーを扱う。 -->
+    <div class="rc-banner" id="rc-banner" data-status="off">
+      <button id="rc-toggle" class="rc-toggle" title="このフォルダで携帯から続けられる Remote Control セッションを並走起動する (履歴は別)">📱 Remote</button>
+      <span class="rc-status" id="rc-status" hidden>—</span>
+      <a id="rc-url" class="rc-url" href="#" hidden title="クリックでブラウザで開く">URL</a>
+      <button id="rc-copy" class="rc-copy" hidden title="URL をクリップボードにコピー">📋</button>
     </div>
   </header>
   <!-- Cmd/Ctrl+F で表示される検索バー -->

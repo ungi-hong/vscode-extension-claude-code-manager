@@ -112,6 +112,12 @@
         "icon": "$(stop-circle)"
       },
       {
+        "command": "claudeCodeManager.toggleRemoteControl",
+        "title": "Toggle Remote Control (携帯/ブラウザ並走)",
+        "category": "Claude Code Manager",
+        "icon": "$(device-mobile)"
+      },
+      {
         "command": "claudeCodeManager.showLogs",
         "title": "Show Output Logs",
         "category": "Claude Code Manager",

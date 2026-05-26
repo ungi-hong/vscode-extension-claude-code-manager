@@ -36,6 +36,11 @@ const searchClose = document.getElementById("search-close") as HTMLButtonElement
 const ctxWindowEl = document.getElementById("ctx-window") as HTMLElement | null;
 const ctxWindowFill = document.getElementById("ctx-window-fill") as HTMLElement | null;
 const ctxWindowPct = document.getElementById("ctx-window-pct") as HTMLElement | null;
+const rcBanner = document.getElementById("rc-banner") as HTMLElement | null;
+const rcToggle = document.getElementById("rc-toggle") as HTMLButtonElement | null;
+const rcStatus = document.getElementById("rc-status") as HTMLElement | null;
+const rcUrl = document.getElementById("rc-url") as HTMLAnchorElement | null;
+const rcCopy = document.getElementById("rc-copy") as HTMLButtonElement | null;
 
 type PermissionMode =
   | "default"
@@ -147,6 +152,8 @@ window.addEventListener("message", (event) => {
     renderPermissionRequest(msg.request);
   } else if (msg.type === "contextWindow") {
     applyContextWindow(msg.payload);
+  } else if (msg.type === "remoteControl") {
+    applyRemoteControl(msg.payload);
   }
 });
 
@@ -178,6 +185,80 @@ function applyContextWindow(payload: {
 
 btnSubmit.addEventListener("click", submitInput);
 btnStop.addEventListener("click", interruptGeneration);
+
+/**
+ * Remote Control バナーを現在の status (off/starting/active) で再描画。
+ * - off: 「📱 Remote」ボタンのみ
+ * - starting: 「⏳ 起動中…」、ボタンは「Stop」に切り替え
+ * - active: URL リンク + コピー、ボタンは「Stop」に切り替え
+ */
+function applyRemoteControl(payload: {
+  status?: "off" | "starting" | "active";
+  url?: string;
+  name?: string;
+}): void {
+  if (!rcBanner || !rcToggle || !rcStatus || !rcUrl || !rcCopy) return;
+  const status = payload?.status ?? "off";
+  rcBanner.dataset.status = status;
+  if (status === "off") {
+    rcToggle.textContent = "📱 Remote";
+    rcToggle.title =
+      "このフォルダで携帯から続けられる Remote Control セッションを並走起動する (履歴は別)";
+    rcStatus.hidden = true;
+    rcUrl.hidden = true;
+    rcCopy.hidden = true;
+    rcUrl.removeAttribute("href");
+    rcUrl.dataset.url = "";
+    return;
+  }
+  rcToggle.textContent = "⛔ Stop";
+  rcToggle.title = "Remote Control を停止";
+  if (status === "starting") {
+    rcStatus.hidden = false;
+    rcStatus.textContent = "起動中…";
+    rcUrl.hidden = true;
+    rcCopy.hidden = true;
+    return;
+  }
+  // active
+  rcStatus.hidden = true;
+  if (payload.url) {
+    rcUrl.hidden = false;
+    rcCopy.hidden = false;
+    rcUrl.textContent = payload.name ? `${payload.name} ↗` : "Open ↗";
+    rcUrl.dataset.url = payload.url;
+    rcUrl.title = payload.url;
+  } else {
+    rcUrl.hidden = true;
+    rcCopy.hidden = true;
+  }
+}
+
+rcToggle?.addEventListener("click", () => {
+  vscode.postMessage({ command: "toggleRemoteControl" });
+});
+rcUrl?.addEventListener("click", (ev) => {
+  ev.preventDefault();
+  const url = rcUrl?.dataset.url;
+  if (!url) return;
+  vscode.postMessage({ command: "openExternal", url });
+});
+rcCopy?.addEventListener("click", () => {
+  const url = rcUrl?.dataset.url;
+  if (!url) return;
+  // CSP で navigator.clipboard が制限されているケースに備え、textarea fallback も用意。
+  void navigator.clipboard?.writeText(url).catch(() => {
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      ta.remove();
+    }
+  });
+});
 
 function interruptGeneration() {
   vscode.postMessage({ command: "interrupt" });
