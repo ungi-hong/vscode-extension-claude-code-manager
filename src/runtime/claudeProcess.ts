@@ -1,24 +1,24 @@
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
+import { ClaudeCliQuery } from "./cliQuery";
 import type {
   CanUseTool,
   PermissionMode,
   PermissionResult,
-  Query,
   SDKMessage,
   SDKUserMessage,
   SlashCommand,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "./cliTypes";
 
 export interface ClaudeProcessOptions {
   cwd: string;
   resumeSessionId?: string;
-  /** SDK の query() に渡す初期権限モード。途中で `setPermissionMode` で変更可能。 */
+  /** 初期権限モード。途中で `setPermissionMode` で変更可能。 */
   permissionMode?: PermissionMode;
   /**
-   * 利用する `claude` CLI バイナリの絶対パス。未指定なら SDK 同梱のバイナリ
-   * (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`) を使う。
-   * VSIX のサイズ削減のためユーザー環境の `which claude` を指定するのが推奨。
+   * 利用する `claude` CLI バイナリの絶対パス。
+   * `claudeCodeManager.claudePath` 設定または PATH 解決で得たもの。
+   * 未指定だと起動できない (extension.ts でガード済み)。
    */
   pathToClaudeCodeExecutable?: string;
   /**
@@ -70,16 +70,18 @@ export declare interface ClaudeProcess {
 }
 
 /**
- * 単一の Claude SDK セッションのライフサイクルを管理する。
+ * 単一の `claude` CLI セッションのライフサイクルを管理する。
  *
- * SDK は ESM 専用 + 同梱 executable のパスを自前解決するため、esbuild bundle
- * には含めず dynamic import でランタイムロードする。
+ * `child_process.spawn` で `claude` バイナリを起動し、stream-json プロトコル
+ * (`ClaudeCliQuery`) で対話する。`@anthropic-ai/claude-agent-sdk` は使わず、
+ * 公式 VSCode 拡張と同じく既存の CLI バイナリ (PATH or `claudeCodeManager.claudePath`)
+ * をそのまま再利用する。
  */
 export class ClaudeProcess extends EventEmitter {
   private done = false;
   private inputResolvers: Array<(v: SDKUserMessage | undefined) => void> = [];
   private inputQueue: SDKUserMessage[] = [];
-  private currentQuery: Query | undefined;
+  private currentQuery: ClaudeCliQuery | undefined;
   private confirmedSessionId: string | undefined;
   private starting: Promise<void> | undefined;
   /** webview からの承認回答待ちの requestId → resolver */
@@ -92,7 +94,7 @@ export class ClaudeProcess extends EventEmitter {
     super();
   }
 
-  /** session_id 確定後に SDK から付与されたもの (`init` 受信前は undefined)。 */
+  /** session_id 確定後に CLI から付与されたもの (`init` 受信前は undefined)。 */
   get sessionId(): string | undefined {
     return this.confirmedSessionId ?? this.options.resumeSessionId;
   }
@@ -112,23 +114,28 @@ export class ClaudeProcess extends EventEmitter {
   }
 
   private async startInternal(): Promise<void> {
-    const sdk = await import("@anthropic-ai/claude-agent-sdk");
+    const cliPath = this.options.pathToClaudeCodeExecutable;
+    if (!cliPath) {
+      throw new Error(
+        "claude CLI path is not configured. Set `claudeCodeManager.claudePath` or install `claude` to PATH.",
+      );
+    }
     const userInput = this.makeUserInputStream();
     const mode = this.options.permissionMode;
 
     // bypassPermissions 以外のモードでは canUseTool を提供して、ツール実行前に
-    // webview で承認 UI を出す (CLI と同じ体験)。
+    // webview で承認 UI を出す (CLI 対話モードと同じ体験)。
     const canUseTool: CanUseTool = (toolName, input, options) => {
       return new Promise<PermissionResult>((resolve) => {
         const requestId = randomUUID();
         this.pendingPermissions.set(requestId, resolve);
         // AskUserQuestion がスキップされる事象の調査用ログ。どのモード下で
         // どのツールが canUseTool に到達したか、また pending として登録されたか
-        // をすべて記録する。発火していないなら SDK 側で auto-deny されている可能性。
+        // をすべて記録する。発火していないなら CLI 側で auto-deny されている可能性。
         this.options.logger?.(
           `[ccmgr] canUseTool fired tool=${toolName} mode=${mode ?? "default"} reqId=${requestId.slice(0, 8)} tuid=${(options.toolUseID ?? "").slice(0, 8)}`,
         );
-        // abort 連携: SDK が中断したら deny として promise を resolve
+        // abort 連携: CLI 側で取り消されたら deny として promise を resolve
         if (options.signal) {
           options.signal.addEventListener(
             "abort",
@@ -156,34 +163,24 @@ export class ClaudeProcess extends EventEmitter {
       });
     };
 
-    const q = sdk.query({
+    const q = new ClaudeCliQuery({
       prompt: userInput,
-      options: {
-        cwd: this.options.cwd,
-        // text_delta のストリーミングを Webview に流して "考えています…" 表示中の
-        // 体感遅延をなくす。
-        includePartialMessages: true,
-        ...(this.options.resumeSessionId
-          ? { resume: this.options.resumeSessionId }
-          : {}),
-        ...(this.options.pathToClaudeCodeExecutable
-          ? { pathToClaudeCodeExecutable: this.options.pathToClaudeCodeExecutable }
-          : {}),
-        ...(this.options.additionalDirectories &&
+      cwd: this.options.cwd,
+      pathToClaudeCodeExecutable: cliPath,
+      // text_delta のストリーミングを Webview に流して "考えています…" 表示中の
+      // 体感遅延をなくす。
+      includePartialMessages: true,
+      resume: this.options.resumeSessionId,
+      additionalDirectories:
+        this.options.additionalDirectories &&
         this.options.additionalDirectories.length > 0
-          ? { additionalDirectories: this.options.additionalDirectories }
-          : {}),
-        ...(mode === "bypassPermissions"
-          ? {
-              permissionMode: mode,
-              allowDangerouslySkipPermissions: true,
-            }
-          : {
-              ...(mode ? { permissionMode: mode } : {}),
-              // bypass 以外では UI で承認させる
-              canUseTool,
-            }),
-      },
+          ? this.options.additionalDirectories
+          : undefined,
+      permissionMode: mode,
+      allowDangerouslySkipPermissions: mode === "bypassPermissions",
+      // bypass モードでは canUseTool を渡さない (CLI 側で自動承認)
+      canUseTool: mode === "bypassPermissions" ? undefined : canUseTool,
+      logger: this.options.logger,
     });
     this.currentQuery = q;
     void this.consume(q);
@@ -206,29 +203,22 @@ export class ClaudeProcess extends EventEmitter {
     await this.currentQuery?.setPermissionMode(mode);
   }
 
-  /** SDK 側で有効な slash command の一覧を取得する。 */
+  /** CLI 側で有効な slash command の一覧を取得する。 */
   async getSupportedCommands(): Promise<SlashCommand[]> {
     return (await this.currentQuery?.supportedCommands()) ?? [];
   }
 
   /**
-   * SDK 公式の context usage 取得。SDKControlGetContextUsageResponse 型が返るが、
+   * 公式と同じ get_context_usage 制御リクエスト経由で context usage を取得。
    * 必要なのは `percentage` (使用率), `totalTokens`, `maxTokens` だけなので
    * 呼び出し側でフィールド単位に取り出す前提。
-   *
-   * SDK の Query.getContextUsage() は内部で control request を投げて
-   * `claude` プロセスから返信を受け取る。`apiKeySource` は関係ないので
-   * SDK 経由 (apiKeySource=none) でも問題なく動く。
    *
    * プロセスが死んでる/まだ initialize していない場合は undefined。
    */
   async getContextUsage(): Promise<unknown | undefined> {
-    const q = this.currentQuery as unknown as {
-      getContextUsage?: () => Promise<unknown>;
-    } | undefined;
-    if (!q?.getContextUsage) return undefined;
+    if (!this.currentQuery) return undefined;
     try {
-      return await q.getContextUsage();
+      return await this.currentQuery.getContextUsage();
     } catch {
       return undefined;
     }
@@ -316,7 +306,7 @@ export class ClaudeProcess extends EventEmitter {
     })();
   }
 
-  private async consume(q: Query): Promise<void> {
+  private async consume(q: ClaudeCliQuery): Promise<void> {
     try {
       for await (const msg of q) {
         this.emit("message", msg);

@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import type { PermissionMode, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionMode, SDKMessage } from "./runtime/cliTypes";
 import { FolderStore } from "./folders/store";
 import { ManagedSessionStore } from "./runtime/persistence";
 import { ProcessManager } from "./runtime/processManager";
@@ -19,9 +19,10 @@ import { SessionsTreeProvider } from "./views/treeProvider";
 import { PanelSlashCommand, SessionPanelManager } from "./views/sessionPanel";
 import { StatusBar } from "./views/statusBar";
 
-import { statSync } from "fs";
+import { statSync, readdirSync } from "fs";
 import { execSync } from "child_process";
 import * as path from "path";
+import * as os from "os";
 
 /** Shift+Tab で循環するモード (bypassPermissions は危険なので含めない)。 */
 const MODE_CYCLE: PermissionMode[] = ["default", "acceptEdits", "plan"];
@@ -50,24 +51,49 @@ export function activate(context: vscode.ExtensionContext): void {
   /**
    * `claude` CLI のパスを解決:
    *   1. `claudeCodeManager.claudePath` 設定が空でなければそれを使う
-   *   2. `which claude` (Windows は `where claude`) でPATHから検索
-   *   3. それもダメなら undefined → SDK 同梱のバイナリにフォールバック
+   *   2. `which claude` (Windows は `where claude`) で PATH から検索
+   *   3. Windows のみ: `mise which claude` で mise 管理 Node の install dir から辿る
+   *   4. Windows のみ: `%LOCALAPPDATA%\mise\installs\node\*\node_modules\@anthropic-ai\
+   *      claude-code\bin\claude.exe` を直接スキャン
+   *   5. それでも見つからなければ undefined を返す (起動できないのでエラー)
+   *
+   * SDK を廃止したため、見つからない場合の同梱バイナリ fallback は無くなった。
    *
    * Windows の難しさ:
    *   npm でインストールされた CLI は `<npm-prefix>/` 配下に
    *     - `claude`        (拡張子なし: mac/linux 用 sh スクリプト)
    *     - `claude.cmd`    (Windows 用バッチラッパー)
    *     - `claude.ps1`    (PowerShell 用)
-   *   を置くが、SDK 側は受け取ったパスを「拡張子が .js/.mjs/.ts 系でなければ
-   *   ネイティブバイナリ」と判定して Node の `child_process.spawn` で *直接*
-   *   実行する。Node の spawn は `.cmd` / `.bat` を `shell: true` なしでは
+   *   を置くが、`child_process.spawn` を `shell: false` で呼ぶ場合 `.cmd` は
    *   起動できないし、拡張子なしの sh は Windows では実行不能。
    *
    *   結果: `.cmd` を渡しても "native binary not found" になる。
    *   対策: `<npm-prefix>/node_modules/@anthropic-ai/claude-code/bin/claude.exe`
    *   (npm が同梱する本物のネイティブバイナリ) を直指定する。これなら
    *   spawn が直接 launch できる。
+   *
+   *   mise 補足: mise (jdx/mise) は Windows でも基本 shim を作らず、`mise activate`
+   *   が走ったシェルだけ `installs/node/<ver>/` を PATH に足す。VS Code が
+   *   非アクティベート環境から起動されると `where claude` は失敗するので、
+   *   `mise which claude` または install dir 直接探索のフォールバックを足す。
    */
+  const npmDirToNativeExe = (dir: string): string | undefined => {
+    const nativeExe = path.join(
+      dir,
+      "node_modules",
+      "@anthropic-ai",
+      "claude-code",
+      "bin",
+      "claude.exe",
+    );
+    try {
+      if (statSync(nativeExe).isFile()) return nativeExe;
+    } catch {
+      // fall through
+    }
+    return undefined;
+  };
+
   const resolveClaudePath = (): string | undefined => {
     const override = vscode.workspace
       .getConfiguration("claudeCodeManager")
@@ -87,38 +113,101 @@ export function activate(context: vscode.ExtensionContext): void {
         // 2) .cmd 経由でインストールされている npm CLI 構造から本物の exe を辿る
         const cmdPath = lines.find((l) => l.toLowerCase().endsWith(".cmd"));
         if (cmdPath) {
-          const dir = path.dirname(cmdPath);
-          const nativeExe = path.join(
-            dir,
-            "node_modules",
-            "@anthropic-ai",
-            "claude-code",
-            "bin",
-            "claude.exe",
-          );
-          try {
-            if (statSync(nativeExe).isFile()) return nativeExe;
-          } catch {
-            // fall through
-          }
-          // exe を辿れない場合、`.cmd` を渡しても SDK 側で spawn に失敗する。
-          // undefined にして SDK 同梱バイナリにフォールバックさせる。
+          const native = npmDirToNativeExe(path.dirname(cmdPath));
+          if (native) return native;
           output.appendLine(
-            `[ccmgr] WARN: found ${cmdPath} but could not locate native claude.exe at ${nativeExe}`,
+            `[ccmgr] WARN: found ${cmdPath} but could not locate native claude.exe under it`,
           );
         }
-        return undefined;
+        // fall through to mise fallbacks
+      } else {
+        if (lines[0]) return lines[0];
       }
-      if (lines[0]) return lines[0];
     } catch {
-      // not in PATH
+      // not in PATH — on Windows still try mise fallbacks
     }
+
+    if (process.platform === "win32") {
+      // 3) `mise which claude` を試す。mise が PATH にあって user が node@... を
+      //    install していれば、これでラッパーパスが返る。
+      try {
+        const out = execSync("mise which claude", {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        if (out) {
+          const lower = out.toLowerCase();
+          if (lower.endsWith(".exe")) return out;
+          if (lower.endsWith(".cmd") || lower.endsWith(".ps1") || !path.extname(out)) {
+            const native = npmDirToNativeExe(path.dirname(out));
+            if (native) return native;
+          }
+          output.appendLine(
+            `[ccmgr] WARN: mise which claude → ${out} but could not locate native claude.exe under it`,
+          );
+        }
+      } catch {
+        // mise not available or no claude in any node tool
+      }
+
+      // 4) 既知の mise install dir を直接スキャン (mise 未 activate でも効く)
+      const home = os.homedir();
+      const localApp =
+        process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
+      const candidates = [
+        path.join(localApp, "mise", "installs", "node"),
+        path.join(home, ".local", "share", "mise", "installs", "node"),
+      ];
+      for (const root of candidates) {
+        let versions: string[];
+        try {
+          versions = readdirSync(root);
+        } catch {
+          continue;
+        }
+        for (const v of versions) {
+          const native = npmDirToNativeExe(path.join(root, v));
+          if (native) {
+            output.appendLine(
+              `[ccmgr] found claude via mise install dir scan: ${native}`,
+            );
+            return native;
+          }
+        }
+      }
+    }
+
     return undefined;
   };
   const claudePath = resolveClaudePath();
   output.appendLine(
-    `[ccmgr] claude CLI path: ${claudePath ?? "(not found in PATH — using SDK bundled binary)"}`,
+    `[ccmgr] claude CLI path: ${claudePath ?? "(NOT FOUND — sessions cannot be started)"}`,
   );
+
+  /**
+   * CLI が見つからない場合、起動経路のあるコマンドで毎回出すエラー導線。
+   * Tree (jsonl 読み取り) 系は CLI 非依存なので activate 自体は続行する。
+   *
+   * 返り値: 起動可能なら true (= claudePath が有効)、未設定なら false。
+   * 呼び出し側は false 時は早期 return する。
+   */
+  const ensureClaudePathOrPrompt = (): boolean => {
+    if (claudePath) return true;
+    void vscode.window
+      .showErrorMessage(
+        "Claude Code Manager: `claude` CLI が見つかりません。`npm i -g @anthropic-ai/claude-code` でインストールするか、`claudeCodeManager.claudePath` に絶対パスを設定してください。",
+        "設定を開く",
+      )
+      .then((sel) => {
+        if (sel === "設定を開く") {
+          void vscode.commands.executeCommand(
+            "workbench.action.openSettings",
+            "claudeCodeManager.claudePath",
+          );
+        }
+      });
+    return false;
+  };
   /** sessionId → 現在の権限モード (Shift+Tab 履歴と SDK の実態の source of truth) */
   const sessionModes = new Map<string, PermissionMode>();
 
@@ -208,6 +297,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const state = registry.get(sessionId);
     if (!state) return undefined;
     if (sessionId.startsWith("pending-")) return undefined;
+    if (!ensureClaudePathOrPrompt()) return undefined;
 
     // 空 JSONL 検出: そのまま resume すると「No conversation found」エラーになる
     const jsonlPath = sessionJsonlPath(state.cwd, sessionId);
@@ -637,6 +727,7 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           return;
         }
+        if (!ensureClaudePathOrPrompt()) return;
         const startMode = getDefaultPermissionMode();
         const { id } = processManager.create(cwd, {
           permissionMode: startMode,

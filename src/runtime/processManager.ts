@@ -5,7 +5,7 @@ import type {
   PermissionResult,
   SDKMessage,
   SlashCommand,
-} from "@anthropic-ai/claude-agent-sdk";
+} from "./cliTypes";
 import {
   Attachment,
   ClaudeProcess,
